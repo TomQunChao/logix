@@ -227,15 +227,13 @@ impl FileTree {
         }
     }
 
-    /// Compute the width based on content
+    /// Compute the width based on content (longest visible filename).
     pub fn compute_width(&self, max_width: u16) -> u16 {
         let content_width = self
             .entries
             .iter()
-            .skip(self.scroll)
-            .take(max_width as usize)
             .map(|e| {
-                // indentation + icon + name + git status
+                // indentation + icon + name + git status + padding
                 let indent = e.depth * 2;
                 let icon = if e.is_dir { 2 } else { 1 }; // "▸ " or "  "
                 let name = e.name.width();
@@ -316,21 +314,24 @@ impl FileTree {
         }
     }
 
-    /// Open the selected file or toggle directory expansion
-    fn open_selected(&mut self, cx: &mut Context) {
+    /// Open the selected file or toggle directory expansion.
+    /// Returns `true` if a file was opened.
+    fn open_selected(&mut self, cx: &mut Context) -> bool {
         if self.selected >= self.entries.len() {
-            return;
+            return false;
         }
 
         let entry = &self.entries[self.selected];
         if entry.is_dir {
             self.toggle_expand(self.selected);
+            false
         } else {
             // Open the file
             let path = entry.path.clone();
             if let Err(e) = cx.editor.open(&path, Action::Replace) {
                 cx.editor.set_error(format!("Failed to open file: {:?}", e));
             }
+            true
         }
     }
 
@@ -645,8 +646,12 @@ impl Component for FileTree {
                 code: KeyCode::Char('l') | KeyCode::Enter | KeyCode::Right,
                 modifiers: KeyModifiers::NONE,
             }) => {
-                self.open_selected(cx);
-                EventResult::Consumed(None)
+                let opened_file = self.open_selected(cx);
+                EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
+                    if opened_file {
+                        compositor.remove("file-tree");
+                    }
+                })))
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Char('h') | KeyCode::Left,
