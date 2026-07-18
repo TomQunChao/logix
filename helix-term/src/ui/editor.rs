@@ -7,6 +7,7 @@ use crate::{
     keymap::{KeymapResult, Keymaps},
     ui::{
         document::{render_document, LinePos, TextRenderer},
+        file_tree::FileTree,
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
         Completion, ProgressSpinners,
@@ -44,6 +45,8 @@ pub struct EditorView {
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
+    /// Optional file tree sidebar rendered as a left pane.
+    pub sidebar: Option<FileTree>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +70,7 @@ impl EditorView {
             completion: None,
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
+            sidebar: None,
         }
     }
 
@@ -1452,6 +1456,23 @@ impl Component for EditorView {
         event: &Event,
         context: &mut crate::compositor::Context,
     ) -> EventResult {
+        // Route events to the file tree sidebar first if it's active.
+        if let Some(ref mut sidebar) = self.sidebar.as_mut() {
+            match sidebar.handle_event(event, context) {
+                EventResult::Consumed(callback) => {
+                    if sidebar.closed {
+                        self.sidebar = None;
+                    }
+                    return EventResult::Consumed(callback);
+                }
+                EventResult::Ignored(_) => {
+                    if sidebar.closed {
+                        self.sidebar = None;
+                    }
+                }
+            }
+        }
+
         let mut cx = commands::Context {
             editor: context.editor,
             count: None,
@@ -1628,8 +1649,30 @@ impl Component for EditorView {
             _ => false,
         };
 
+        // Compute sidebar width if active.
+        let sidebar_width = self.sidebar.as_ref().map(|sb| sb.compute_width(area.width));
+
+        // When the sidebar is active the editor area is shifted to the right
+        // so that the tree and all decorations appear in a proper split pane.
+        let main_area = if let Some(w) = sidebar_width {
+            Rect::new(
+                area.x + w,
+                area.y,
+                area.width.saturating_sub(w),
+                area.height,
+            )
+        } else {
+            area
+        };
+
+        // Render the sidebar before the editor so it sits on the left.
+        if let Some(ref mut sidebar) = self.sidebar.as_mut() {
+            let sidebar_area = Rect::new(area.x, area.y, sidebar_width.unwrap_or(25), area.height);
+            sidebar.render(sidebar_area, surface, cx);
+        }
+
         // -1 for commandline and -1 for bufferline
-        let mut editor_area = area.clip_bottom(1);
+        let mut editor_area = main_area.clip_bottom(1);
         if use_bufferline {
             editor_area = editor_area.clip_top(1);
         }
@@ -1643,12 +1686,12 @@ impl Component for EditorView {
 
         for (view, is_focused) in cx.editor.tree.views() {
             let doc = cx.editor.document(view.doc).unwrap();
-            self.render_view(cx.editor, doc, view, area, surface, is_focused);
+            self.render_view(cx.editor, doc, view, main_area, surface, is_focused);
         }
 
         if config.auto_info {
             if let Some(mut info) = cx.editor.autoinfo.take() {
-                info.render(area, surface, cx);
+                info.render(main_area, surface, cx);
                 cx.editor.autoinfo = Some(info)
             }
         }
@@ -1667,14 +1710,14 @@ impl Component for EditorView {
             };
 
             surface.set_string(
-                area.x,
-                area.y + area.height.saturating_sub(1),
+                main_area.x,
+                main_area.y + main_area.height.saturating_sub(1),
                 status_msg,
                 style,
             );
         }
 
-        if area.width.saturating_sub(status_msg_width as u16) > key_width {
+        if main_area.width.saturating_sub(status_msg_width as u16) > key_width {
             let mut disp = String::new();
             if let Some(count) = cx.editor.count {
                 disp.push_str(&count.to_string())
@@ -1694,11 +1737,11 @@ impl Component for EditorView {
             let restricted = workspace_trust_indicator_visible(cx.editor);
             let trust_width = if restricted { 3 } else { 0 };
             surface.set_string(
-                area.x
-                    + area
+                main_area.x
+                    + main_area
                         .width
                         .saturating_sub(key_width + macro_width + trust_width),
-                area.y + area.height.saturating_sub(1),
+                main_area.y + main_area.height.saturating_sub(1),
                 disp.get(disp.len().saturating_sub(key_width as usize)..)
                     .unwrap_or(&disp),
                 style,
@@ -1708,9 +1751,10 @@ impl Component for EditorView {
                     .fg(helix_view::graphics::Color::Yellow)
                     .add_modifier(Modifier::BOLD);
                 surface.set_string(
-                    area.x
-                        .saturating_add(area.width.saturating_sub(3 + macro_width)),
-                    area.y + area.height.saturating_sub(1),
+                    main_area
+                        .x
+                        .saturating_add(main_area.width.saturating_sub(3 + macro_width)),
+                    main_area.y + main_area.height.saturating_sub(1),
                     "[⚠]",
                     style,
                 );
@@ -1721,8 +1765,8 @@ impl Component for EditorView {
                     .fg(helix_view::graphics::Color::Yellow)
                     .add_modifier(Modifier::BOLD);
                 surface.set_string(
-                    area.x + area.width.saturating_sub(3),
-                    area.y + area.height.saturating_sub(1),
+                    main_area.x + main_area.width.saturating_sub(3),
+                    main_area.y + main_area.height.saturating_sub(1),
                     &disp,
                     style,
                 );

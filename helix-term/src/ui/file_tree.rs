@@ -102,6 +102,8 @@ pub struct FileTree {
     pub min_width: u16,
     /// Cached height for scroll calculations
     cached_height: u16,
+    /// Set to true when the tree should be closed by the parent.
+    pub closed: bool,
 }
 
 impl FileTree {
@@ -118,6 +120,7 @@ impl FileTree {
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
+            closed: false,
         };
         tree.load_directory(&tree.root.clone(), 0);
         tree.load_git_status(editor);
@@ -496,36 +499,26 @@ impl FileTree {
 
 impl Component for FileTree {
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
-        // Render as a left sidebar using only the computed width.  This leaves
-        // the rest of the viewport untouched so the editor remains visible.
-        let tree_width = self.compute_width(area.width);
-        let tree_area = Rect::new(area.x, area.y, tree_width, area.height);
-
         // Cache height for scroll calculations
-        self.cached_height = tree_area.height;
+        self.cached_height = area.height;
 
         // Background
         let bg_style = cx.editor.theme.get("ui.background");
-        surface.set_style(tree_area, bg_style);
+        surface.set_style(area, bg_style);
 
         // Border on the right
         let border_style = cx.editor.theme.get("ui.separator");
-        for y in tree_area.y..tree_area.y + tree_area.height {
-            surface.set_string(tree_area.x + tree_area.width - 1, y, "│", border_style);
+        for y in area.y..area.y + area.height {
+            surface.set_string(area.x + area.width - 1, y, "│", border_style);
         }
 
         // Title
         let title_style = cx.editor.theme.get("ui.text.focus");
         let title = " File Tree ";
-        surface.set_string(tree_area.x + 1, tree_area.y, title, title_style);
+        surface.set_string(area.x + 1, area.y, title, title_style);
 
         // Render entries
-        let entries_area = Rect::new(
-            tree_area.x,
-            tree_area.y + 1,
-            tree_area.width - 1,
-            tree_area.height - 1,
-        );
+        let entries_area = Rect::new(area.x, area.y + 1, area.width - 1, area.height - 1);
         let visible_height = entries_area.height as usize;
 
         // Update scroll position
@@ -549,24 +542,19 @@ impl Component for FileTree {
             let filter_style = cx.editor.theme.get("ui.text");
             let filter_text = format!("/{}", self.filter_query);
             surface.set_string(
-                tree_area.x + 1,
-                tree_area.y + tree_area.height - 1,
+                area.x + 1,
+                area.y + area.height - 1,
                 &filter_text,
                 filter_style,
             );
         }
 
         // Show help hint at bottom if space allows
-        if tree_area.height > 3 {
+        if area.height > 3 {
             let help_style = cx.editor.theme.get("ui.text");
             let help = "j/k:nav Enter:open a:create d:del q:close";
-            if help.len() < tree_area.width as usize {
-                surface.set_string(
-                    tree_area.x + 1,
-                    tree_area.y + tree_area.height - 1,
-                    help,
-                    help_style,
-                );
+            if help.len() < area.width as usize {
+                surface.set_string(area.x + 1, area.y + area.height - 1, help, help_style);
             }
         }
     }
@@ -617,15 +605,17 @@ impl Component for FileTree {
             | Event::Key(KeyEvent {
                 code: KeyCode::Esc,
                 modifiers: KeyModifiers::NONE,
-            }) => EventResult::Consumed(Some(Box::new(|compositor, _cx| {
-                compositor.remove("file-tree");
-            }))),
+            }) => {
+                self.closed = true;
+                EventResult::Consumed(None)
+            }
             Event::Key(KeyEvent {
                 code: KeyCode::Char('q'),
                 modifiers: KeyModifiers::NONE,
-            }) => EventResult::Consumed(Some(Box::new(|compositor, _cx| {
-                compositor.remove("file-tree");
-            }))),
+            }) => {
+                self.closed = true;
+                EventResult::Consumed(None)
+            }
             Event::Key(KeyEvent {
                 code: KeyCode::Char('j') | KeyCode::Down,
                 modifiers: KeyModifiers::NONE,
@@ -647,11 +637,10 @@ impl Component for FileTree {
                 modifiers: KeyModifiers::NONE,
             }) => {
                 let opened_file = self.open_selected(cx);
-                EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
-                    if opened_file {
-                        compositor.remove("file-tree");
-                    }
-                })))
+                if opened_file {
+                    self.closed = true;
+                }
+                EventResult::Consumed(None)
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Char('h') | KeyCode::Left,
