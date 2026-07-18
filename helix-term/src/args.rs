@@ -14,6 +14,7 @@ pub struct Args {
     pub fetch_grammars: bool,
     pub build_grammars: bool,
     pub strict: bool,
+    pub dry_run: bool,
     pub split: Option<Layout>,
     pub verbosity: u64,
     pub log_file: Option<PathBuf>,
@@ -52,6 +53,7 @@ impl Args {
                 "--version" => args.display_version = true,
                 "--help" => args.display_help = true,
                 "--strict" => args.strict = true,
+                "--dry-run" => args.dry_run = true,
                 "--tutor" => args.load_tutor = true,
                 "--vsplit" => match args.split {
                     Some(_) => anyhow::bail!("can only set a split once of a specific type"),

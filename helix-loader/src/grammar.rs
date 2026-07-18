@@ -400,7 +400,7 @@ impl VendoredGrammar {
     /// Creates directory and sets it up as a git repo, with remote set correctly.
     fn init(&self, remote: &str, object_format: GitObjectFormat) -> Result<()> {
         // Create the grammar directory if needed.
-        fs::create_dir_all(&self.dir).context(format!(
+        crate::dry_run::create_dir_all(&self.dir).context(format!(
             "Could not create grammar directory {:?}",
             self.dir
         ))?;
@@ -452,6 +452,30 @@ fn fetch_grammar(grammar: GrammarConfiguration) -> Result<FetchStatus> {
     let repo = VendoredGrammar::new(&grammar.grammar_id);
 
     let (object_format, revision) = extract_object_format_from_revision(&revision);
+
+    if crate::dry_run::is_enabled() {
+        // Record (but do not perform) the directory creation and git
+        // operations. `revision()` is a read-only probe that fails
+        // gracefully when the grammar directory does not exist yet.
+        crate::dry_run::create_dir_all(&repo.dir).ok();
+        let context = format!("grammar fetch: {}", grammar.grammar_id);
+        if repo.revision().as_deref() == Some(revision) {
+            crate::dry_run::record_action(context, format!("already on {revision}, up to date"));
+            return Ok(FetchStatus::GitUpToDate);
+        }
+        crate::dry_run::record_action(
+            context,
+            format!(
+                "would init {} (`git init --object-format {}`, remote `{remote}`), \
+                 then `git fetch --depth 1 {REMOTE_NAME} {revision}` and `git checkout {revision}`",
+                repo.dir.display(),
+                object_format.as_str(),
+            ),
+        );
+        return Ok(FetchStatus::GitUpdated {
+            revision: revision.to_string(),
+        });
+    }
 
     // WARN: Must init before other operations are done.
     repo.init(&remote, object_format)?;
@@ -580,6 +604,22 @@ fn build_tree_sitter_library(
 
     if !recompile {
         return Ok(BuildStatus::AlreadyBuilt);
+    }
+
+    if crate::dry_run::is_enabled() {
+        let scanner = scanner_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "(none)".to_owned());
+        crate::dry_run::record_action(
+            format!("grammar build: {}", grammar.grammar_id),
+            format!(
+                "would compile {} (scanner: {scanner}) into {}",
+                parser_path.display(),
+                library_path.display(),
+            ),
+        );
+        return Ok(BuildStatus::Built);
     }
 
     let mut config = cc::Build::new();

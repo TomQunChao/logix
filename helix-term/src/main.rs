@@ -17,6 +17,17 @@ fn setup_logging(verbosity: u64) -> Result<()> {
     Ok(())
 }
 
+/// Print the dry-run report: searched directories, config files read,
+/// directories that would be created, synthesized config, and intercepted
+/// actions.
+fn print_dry_run_report() {
+    let searched_dirs = [
+        ("config directories", helix_loader::config_dirs().to_vec()),
+        ("runtime directories", helix_loader::runtime_dirs().to_vec()),
+    ];
+    helix_loader::dry_run::print_report(&searched_dirs);
+}
+
 fn main() -> Result<()> {
     let exit_code = main_impl()?;
     std::process::exit(exit_code);
@@ -25,6 +36,13 @@ fn main() -> Result<()> {
 #[tokio::main]
 async fn main_impl() -> Result<i32> {
     let args = Args::parse_args().context("could not parse arguments")?;
+
+    // Dry-run must be enabled before any initialization so that the side
+    // effects of the `initialize_*` calls (creating directories) are
+    // intercepted and recorded instead of performed.
+    if args.dry_run {
+        helix_loader::dry_run::enable();
+    }
 
     helix_loader::initialize_config_dirs(args.config_dir.clone());
     helix_loader::initialize_config_file(args.config_file.clone());
@@ -49,6 +67,11 @@ ARGS:
 FLAGS:
     -h, --help                     Print help information
     --strict                       Bail on error for commands that can fail.
+    --dry-run                      Do not modify the system: report the directories
+                                   searched, directories that would be created, config
+                                   files read and the synthesized (merged) config.
+                                   Combined with --grammar fetch/build, the git and
+                                   compiler invocations are reported but not run.
     --tutor                        Load the tutorial
     --health [CATEGORY]            Check for potential errors in editor setup
                                    CATEGORY can be a language or one of 'clipboard', 'languages',
@@ -106,13 +129,59 @@ ENVIRONMENT VARIABLES:
     }
 
     if args.fetch_grammars {
-        helix_loader::grammar::fetch_grammars(args.strict)?;
+        if args.dry_run {
+            println!("dry-run mode: no grammars will be fetched, no directories created");
+        }
+        let result = helix_loader::grammar::fetch_grammars(args.strict);
+        if args.dry_run {
+            print_dry_run_report();
+        }
+        result?;
         return Ok(0);
     }
 
     if args.build_grammars {
-        helix_loader::grammar::build_grammars(None, args.strict)?;
+        if args.dry_run {
+            println!("dry-run mode: no grammars will be built, no directories created");
+        }
+        let result = helix_loader::grammar::build_grammars(None, args.strict);
+        if args.dry_run {
+            print_dry_run_report();
+        }
+        result?;
         return Ok(0);
+    }
+
+    // Standalone dry-run: exercise the whole config loading pipeline (config
+    // file layering, workspace trust gates, language config merging) and
+    // report what the config system synthesized, without starting the editor.
+    if args.dry_run {
+        println!("dry-run mode: checking the config system without making changes");
+
+        let config = Config::load_default();
+
+        // Load the language config with the same trust gate the editor would
+        // use, so the report reflects what would actually take effect.
+        let trust = match &config {
+            Ok(config) => helix_loader::workspace_trust::WorkspaceTrust::new(
+                (&config.editor.workspace_trust).into(),
+            ),
+            Err(_) => helix_loader::workspace_trust::WorkspaceTrust::new(Default::default()),
+        };
+        let lang_config = helix_loader::config::user_lang_config(&trust);
+
+        print_dry_run_report();
+
+        let mut exit_code = 0;
+        if let Err(err) = &config {
+            eprintln!("config load failed: {err}");
+            exit_code = 1;
+        }
+        if let Err(err) = &lang_config {
+            eprintln!("language config load failed: {err}");
+            exit_code = 1;
+        }
+        return Ok(exit_code);
     }
 
     setup_logging(args.verbosity).context("failed to initialize logging")?;

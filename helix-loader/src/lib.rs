@@ -1,4 +1,5 @@
 pub mod config;
+pub mod dry_run;
 pub mod grammar;
 pub mod workspace_trust;
 
@@ -40,14 +41,13 @@ static LOG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell:
 /// location. Creation failures are ignored: subsequent operations that need the
 /// directory will surface their own errors.
 pub fn initialize_config_dirs(specified_dir: Option<PathBuf>) {
-    if let Some(dir) = &specified_dir {
-        std::fs::create_dir_all(dir).ok();
+    let normalized = specified_dir.map(normalize_path);
+    if let Some(dir) = &normalized {
+        dry_run::create_dir_all(dir).ok();
     }
-    SPECIFIED_CONFIG_DIR
-        .set(specified_dir.clone().map(normalize_path))
-        .ok();
+    SPECIFIED_CONFIG_DIR.set(normalized).ok();
     CONFIG_DIRS
-        .set(prioritize_config_dirs(specified_dir))
+        .set(prioritize_config_dirs(SPECIFIED_CONFIG_DIR.get().unwrap().clone()))
         .ok();
 }
 
@@ -80,10 +80,11 @@ pub fn initialize_lang_config_files(specified_file: Option<PathBuf>) {
 /// fetch`) and is created here. Creation failures are ignored: subsequent operations that
 /// need the directory will surface their own errors.
 pub fn set_runtime_dir_override(dir: Option<PathBuf>) {
-    if let Some(dir) = &dir {
-        std::fs::create_dir_all(dir).ok();
+    let normalized = dir.map(normalize_path);
+    if let Some(dir) = &normalized {
+        dry_run::create_dir_all(dir).ok();
     }
-    RUNTIME_DIR_OVERRIDE.set(dir.map(normalize_path)).ok();
+    RUNTIME_DIR_OVERRIDE.set(normalized).ok();
 }
 
 pub fn initialize_log_file(specified_file: Option<PathBuf>) {
@@ -510,7 +511,7 @@ fn default_config_file() -> PathBuf {
 fn ensure_parent_dir(path: &Path) {
     if let Some(parent) = path.parent() {
         if !parent.exists() {
-            std::fs::create_dir_all(parent).ok();
+            dry_run::create_dir_all(parent).ok();
         }
     }
 }
