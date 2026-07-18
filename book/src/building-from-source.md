@@ -106,13 +106,18 @@ Or, create a symlink in `%appdata%\helix\` that links to the source code directo
 When Helix finds multiple runtime directories it will search through them for files in the
 following order:
 
-1. `runtime/` sibling directory to `$CARGO_MANIFEST_DIR` directory (this is intended for
-  developing and testing helix only).
-2. `runtime/` subdirectory of OS-dependent helix user config directory.
-3. `$HELIX_RUNTIME`
-4. Distribution-specific fallback directory (set at compile time—not run time—
+1. The `--runtime-dir <dir>` command line argument.
+2. `$HELIX_RUNTIME`
+3. `runtime/` subdirectory of the workspace's `.helix` directory, but only when the
+   workspace is [trusted](./workspace-trust.md). Tree-sitter grammars are native libraries,
+   so a workspace-local runtime requires an explicit trust grant.
+4. `runtime/` sibling directory to `$CARGO_MANIFEST_DIR` directory (this is intended for
+   developing and testing helix only).
+5. `runtime/` subdirectory of each config directory: the `--config-dir` argument first,
+   then `$HELIX_CONFIG_DIR`, then the OS-dependent default (e.g. `~/.config/helix`).
+6. Distribution-specific fallback directory (set at compile time—not run time—
    with the `HELIX_DEFAULT_RUNTIME` environment variable)
-5. `runtime/` subdirectory of path to Helix executable.
+7. `runtime/` subdirectory of path to Helix executable.
 
 This order also sets the priority for selecting which file will be used if multiple runtime
 directories have files with the same name.

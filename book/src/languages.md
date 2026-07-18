@@ -5,15 +5,18 @@ in `languages.toml` files.
 
 ## `languages.toml` files
 
-There are three possible locations for a `languages.toml` file:
+There are several possible locations for a `languages.toml` file, merged
+together from lowest to highest priority:
 
 1. In the Helix source code, which lives in the
    [Helix repository](https://github.com/helix-editor/helix/blob/master/languages.toml).
    It provides the default configurations for languages and language servers.
 
 2. In your [configuration directory](./configuration.md). This overrides values
-   from the built-in language configuration. For example, to disable
-   auto-formatting for Rust:
+   from the built-in language configuration. When multiple config directories
+   are in use (`--config-dir`, `HELIX_CONFIG_DIR` and the system default), each
+   one may contain a `languages.toml` and they are merged in turn. For example,
+   to disable auto-formatting for Rust:
 
    ```toml
    # in <config_dir>/helix/languages.toml
@@ -29,7 +32,15 @@ There are three possible locations for a `languages.toml` file:
 3. In a `.helix` folder in your project. Language configuration may also be
    overridden local to a project by creating a `languages.toml` file in a
    `.helix` folder. Its settings will be merged with the language configuration
-   in the configuration directory and the built-in configuration.
+   in the configuration directory and the built-in configuration. This layer
+   requires the workspace to be [trusted](./workspace-trust.md).
+
+4. An explicitly specified file via the `HELIX_LANGUAGES_FILE` environment
+   variable or the `--languages` command line argument (the latter wins over
+   the former). These are merged on top of everything else.
+
+See [configuration file merging](./configuration.md#configuration-file-merging)
+for the full priority order.
 
 ## Language configuration
 
