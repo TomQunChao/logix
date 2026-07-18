@@ -128,6 +128,13 @@ to the first directory in this list. For example, `hx --config-dir ./my-config -
 fetch` fetches into `./my-config/runtime/`, while `--runtime-dir <dir>` redirects the
 output to `<dir>`.
 
+Add `--dry-run` to either command to preview what would happen without
+touching the system: the directories that would be created, the grammars that
+would be fetched (with their git remotes and revisions) or compiled, and the
+runtime directories that were searched are reported, but no `git` or compiler
+commands are actually run. See
+[verifying the configuration with `--dry-run`](./configuration.md#verifying-the-configuration-with---dry-run).
+
 #### Note to packagers
 
 If you are making a package of Helix for end users, to provide a good out of

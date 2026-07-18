@@ -195,7 +195,15 @@ pub fn print_report(searched_dirs: &[(&str, Vec<PathBuf>)]) {
             println!("  languages: {}", summary.language_count);
             println!("  grammars:  {}", summary.grammar_count);
             match &summary.grammar_selection {
-                Some(sel) => println!("  use-grammars: {sel}"),
+                Some(sel) => {
+                    for (i, line) in sel.lines().enumerate() {
+                        if i == 0 {
+                            println!("  use-grammars: {line}");
+                        } else {
+                            println!("    {line}");
+                        }
+                    }
+                }
                 None => println!("  use-grammars: (all grammars selected)"),
             }
         }
