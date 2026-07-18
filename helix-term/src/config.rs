@@ -81,6 +81,21 @@ impl Config {
             }
         }
 
+        // Record the synthesized (merged) configuration for the dry-run report.
+        // `merge_layers` may run twice in `load_default` (user-level for the trust
+        // gate, then again with the workspace layer); the last recording wins and
+        // reflects the final effective config.
+        if helix_loader::dry_run::is_enabled() {
+            if let Some(value) = &editor {
+                if let Ok(rendered) = toml::to_string_pretty(value) {
+                    helix_loader::dry_run::record_synthesized_editor(rendered);
+                }
+            }
+            if let Some(theme) = &theme {
+                helix_loader::dry_run::record_synthesized_theme(format!("{theme:?}"));
+            }
+        }
+
         let editor = match editor {
             Some(value) => value.try_into().map_err(ConfigLoadError::BadConfig)?,
             None => helix_view::editor::Config::default(),
@@ -95,7 +110,7 @@ impl Config {
         path: &std::path::Path,
         explicit: bool,
     ) -> Result<Option<ConfigRaw>, ConfigLoadError> {
-        match fs::read_to_string(path) {
+        let result = match fs::read_to_string(path) {
             Ok(file) => toml::from_str(&file)
                 .map(Some)
                 .map_err(ConfigLoadError::BadConfig),
@@ -106,7 +121,17 @@ impl Config {
                 Ok(None)
             }
             Err(err) => Err(ConfigLoadError::Error(err)),
+        };
+        if helix_loader::dry_run::is_enabled() {
+            use helix_loader::dry_run::ReadOutcome;
+            let outcome = match &result {
+                Ok(Some(_)) => ReadOutcome::Loaded,
+                Ok(None) => ReadOutcome::NotFound,
+                Err(err) => ReadOutcome::Error(err.to_string()),
+            };
+            helix_loader::dry_run::record_read_config(path.to_path_buf(), outcome);
         }
+        result
     }
 
     /// Load the configuration, merging layers from lowest to highest priority:
