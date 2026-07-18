@@ -3275,8 +3275,16 @@ fn file_tree_toggle(cx: &mut Context) {
     }
 
     cx.callback.push(Box::new(move |compositor, cx| {
-        if compositor.remove("file-tree").is_none() {
-            compositor.push(Box::new(ui::FileTree::new(root, cx.editor)));
+        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+            match editor_view.sidebar.take() {
+                Some(_sidebar) => {
+                    // Sidebar was open, now closed.
+                }
+                None => {
+                    // Sidebar was not open, open it.
+                    editor_view.sidebar = Some(ui::FileTree::new(root, cx.editor));
+                }
+            }
         }
     }));
 }
