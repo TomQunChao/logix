@@ -102,7 +102,8 @@ impl Application {
 
         use helix_view::editor::Action;
 
-        let mut theme_parent_dirs = vec![helix_loader::config_dir()];
+        let mut theme_parent_dirs: Vec<std::path::PathBuf> =
+            helix_loader::config_dirs().to_vec();
         theme_parent_dirs.extend(helix_loader::runtime_dirs().iter().cloned());
         let theme_loader = theme::Loader::new(&theme_parent_dirs);
 
