@@ -74,7 +74,15 @@ pub fn initialize_lang_config_files(specified_file: Option<PathBuf>) {
 /// The runtime directory list itself is built lazily on first access (see [`runtime_dirs`])
 /// so that workspace-relative entries (`.helix/runtime/`) resolve against the final working
 /// directory (i.e. after `-w` has been applied).
+///
+/// Like [`initialize_config_dirs`], the explicitly specified directory is allowed to not
+/// exist yet (e.g. bootstrapping a fresh runtime via `hx --runtime-dir ./new --grammar
+/// fetch`) and is created here. Creation failures are ignored: subsequent operations that
+/// need the directory will surface their own errors.
 pub fn set_runtime_dir_override(dir: Option<PathBuf>) {
+    if let Some(dir) = &dir {
+        std::fs::create_dir_all(dir).ok();
+    }
     RUNTIME_DIR_OVERRIDE.set(dir.map(normalize_path)).ok();
 }
 
