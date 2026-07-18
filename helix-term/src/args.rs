@@ -98,12 +98,15 @@ impl Args {
                     None => anyhow::bail!("--languages must specify a path to a languages.toml file"),
                 },
                 "--runtime-dir" => match argv.next().as_deref() {
-                    Some(path) if Path::new(path).is_dir() => {
-                        args.runtime_dir = Some(path.into())
+                    // Like --config-dir, a directory that does not exist yet is
+                    // accepted; it is created during initialization (see
+                    // helix_loader::set_runtime_dir_override) so that e.g.
+                    // `hx --runtime-dir ./new --grammar fetch` can bootstrap a
+                    // fresh runtime directory.
+                    Some(path) if Path::new(path).exists() && !Path::new(path).is_dir() => {
+                        anyhow::bail!("--runtime-dir specified is not a directory: {}", path)
                     }
-                    Some(path) => {
-                        anyhow::bail!("--runtime-dir specified does not exist or is not a directory: {}", path)
-                    }
+                    Some(path) => args.runtime_dir = Some(path.into()),
                     None => anyhow::bail!("--runtime-dir must specify a path to a directory"),
                 },
                 "--log" => match argv.next().as_deref() {
