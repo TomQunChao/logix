@@ -18,6 +18,9 @@ pub struct Args {
     pub verbosity: u64,
     pub log_file: Option<PathBuf>,
     pub config_file: Option<PathBuf>,
+    pub config_dir: Option<PathBuf>,
+    pub languages_file: Option<PathBuf>,
+    pub runtime_dir: Option<PathBuf>,
     pub files: IndexMap<PathBuf, Vec<Position>>,
     pub working_directory: Option<PathBuf>,
 }
@@ -70,8 +73,36 @@ impl Args {
                     }
                 },
                 "-c" | "--config" => match argv.next().as_deref() {
-                    Some(path) => args.config_file = Some(path.into()),
+                    Some(path) if Path::new(path).is_file() => {
+                        args.config_file = Some(path.into())
+                    }
+                    Some(path) => anyhow::bail!("config file does not exist: {}", path),
                     None => anyhow::bail!("--config must specify a path to read"),
+                },
+                "--config-dir" => match argv.next().as_deref() {
+                    Some(path) if Path::new(path).is_dir() => {
+                        args.config_dir = Some(path.into())
+                    }
+                    Some(path) => {
+                        anyhow::bail!("--config-dir specified does not exist or is not a directory: {}", path)
+                    }
+                    None => anyhow::bail!("--config-dir must specify a path to a directory"),
+                },
+                "--languages" => match argv.next().as_deref() {
+                    Some(path) if Path::new(path).is_file() => {
+                        args.languages_file = Some(path.into())
+                    }
+                    Some(path) => anyhow::bail!("languages file does not exist: {}", path),
+                    None => anyhow::bail!("--languages must specify a path to a languages.toml file"),
+                },
+                "--runtime-dir" => match argv.next().as_deref() {
+                    Some(path) if Path::new(path).is_dir() => {
+                        args.runtime_dir = Some(path.into())
+                    }
+                    Some(path) => {
+                        anyhow::bail!("--runtime-dir specified does not exist or is not a directory: {}", path)
+                    }
+                    None => anyhow::bail!("--runtime-dir must specify a path to a directory"),
                 },
                 "--log" => match argv.next().as_deref() {
                     Some(path) => args.log_file = Some(path.into()),

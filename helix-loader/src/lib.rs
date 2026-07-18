@@ -9,17 +9,55 @@ use std::path::{Path, PathBuf};
 
 pub const VERSION_AND_GIT_HASH: &str = env!("VERSION_AND_GIT_HASH");
 
-static RUNTIME_DIRS: once_cell::sync::Lazy<Vec<PathBuf>> =
-    once_cell::sync::Lazy::new(prioritize_runtime_dirs);
+static RUNTIME_DIRS: once_cell::sync::OnceCell<Vec<PathBuf>> = once_cell::sync::OnceCell::new();
 
-static CONFIG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
+static RUNTIME_DIR_OVERRIDE: once_cell::sync::OnceCell<Option<PathBuf>> =
+    once_cell::sync::OnceCell::new();
+
+static CONFIG_DIRS: once_cell::sync::OnceCell<Vec<PathBuf>> = once_cell::sync::OnceCell::new();
+
+static CONFIG_FILE_OVERRIDES: once_cell::sync::OnceCell<Vec<PathBuf>> =
+    once_cell::sync::OnceCell::new();
+
+static LANG_CONFIG_FILE_OVERRIDES: once_cell::sync::OnceCell<Vec<PathBuf>> =
+    once_cell::sync::OnceCell::new();
 
 static LOG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell::new();
 
+/// Initialize the config directory chain from the `--config-dir` CLI argument.
+///
+/// See [`config_dirs`] for the priority order.
+pub fn initialize_config_dirs(specified_dir: Option<PathBuf>) {
+    CONFIG_DIRS
+        .set(prioritize_config_dirs(specified_dir))
+        .ok();
+}
+
+/// Initialize the config file override chain from the `--config` CLI argument.
+///
+/// See [`config_file_overrides`] for the priority order.
 pub fn initialize_config_file(specified_file: Option<PathBuf>) {
-    let config_file = specified_file.unwrap_or_else(default_config_file);
-    ensure_parent_dir(&config_file);
-    CONFIG_FILE.set(config_file).ok();
+    let overrides = config_file_override_chain(specified_file);
+    ensure_parent_dir(&effective_config_file(&overrides));
+    CONFIG_FILE_OVERRIDES.set(overrides).ok();
+}
+
+/// Initialize the language config file override chain from the `--languages` CLI argument.
+///
+/// See [`lang_config_file_overrides`] for the priority order.
+pub fn initialize_lang_config_files(specified_file: Option<PathBuf>) {
+    LANG_CONFIG_FILE_OVERRIDES
+        .set(lang_config_file_override_chain(specified_file))
+        .ok();
+}
+
+/// Store the `--runtime-dir` CLI override.
+///
+/// The runtime directory list itself is built lazily on first access (see [`runtime_dirs`])
+/// so that workspace-relative entries (`.helix/runtime/`) resolve against the final working
+/// directory (i.e. after `-w` has been applied).
+pub fn set_runtime_dir_override(dir: Option<PathBuf>) {
+    RUNTIME_DIR_OVERRIDE.set(dir.map(normalize_path)).ok();
 }
 
 pub fn initialize_log_file(specified_file: Option<PathBuf>) {
@@ -28,21 +66,42 @@ pub fn initialize_log_file(specified_file: Option<PathBuf>) {
     LOG_FILE.set(log_file).ok();
 }
 
+/// Expand `~` and normalize away `.`/`..` components.
+fn normalize_path(path: PathBuf) -> PathBuf {
+    path::normalize(path::expand_tilde(&path))
+}
+
 /// A list of runtime directories from highest to lowest priority
 ///
 /// The priority is:
 ///
-/// 1. sibling directory to `CARGO_MANIFEST_DIR` (if environment variable is set)
-/// 2. subdirectory of user config directory (always included)
-/// 3. `HELIX_RUNTIME` (if environment variable is set)
-/// 4. `HELIX_DEFAULT_RUNTIME` (if environment variable is set *at build time*)
-/// 5. subdirectory of path to helix executable (always included)
+/// 1. the `--runtime-dir` command line argument
+/// 2. `HELIX_RUNTIME` (if the environment variable is set)
+/// 3. `.helix/runtime/` of the current workspace (only if the workspace is trusted,
+///    see [`workspace_trust`])
+/// 4. sibling directory to `CARGO_MANIFEST_DIR` (if the environment variable is set)
+/// 5. `runtime/` inside each config directory (see [`config_dirs`], highest priority first)
+/// 6. `HELIX_DEFAULT_RUNTIME` (if the environment variable is set *at build time*)
+/// 7. subdirectory of path to helix executable (always included)
 ///
 /// Postcondition: returns at least two paths (they might not exist).
-fn prioritize_runtime_dirs() -> Vec<PathBuf> {
+fn prioritize_runtime_dirs(cli_dir: Option<PathBuf>) -> Vec<PathBuf> {
     const RT_DIR: &str = "runtime";
     // Adding higher priority first
     let mut rt_dirs = Vec::new();
+    if let Some(dir) = cli_dir {
+        rt_dirs.push(dir);
+    }
+
+    if let Ok(dir) = std::env::var("HELIX_RUNTIME") {
+        rt_dirs.push(normalize_path(dir.into()));
+    }
+
+    if let Some(dir) = trusted_workspace_runtime_dir() {
+        log::debug!("trusted workspace runtime dir: {}", dir.to_string_lossy());
+        rt_dirs.push(dir);
+    }
+
     if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
         // this is the directory of the crate being run by cargo, we need the workspace path so we take the parent
         let path = PathBuf::from(dir).parent().unwrap().join(RT_DIR);
@@ -50,12 +109,8 @@ fn prioritize_runtime_dirs() -> Vec<PathBuf> {
         rt_dirs.push(path);
     }
 
-    let conf_rt_dir = config_dir().join(RT_DIR);
-    rt_dirs.push(conf_rt_dir);
-
-    if let Ok(dir) = std::env::var("HELIX_RUNTIME") {
-        let dir = path::expand_tilde(Path::new(&dir));
-        rt_dirs.push(path::normalize(dir));
+    for dir in config_dirs() {
+        rt_dirs.push(dir.join(RT_DIR));
     }
 
     // If this variable is set during build time, it will always be included
@@ -77,13 +132,38 @@ fn prioritize_runtime_dirs() -> Vec<PathBuf> {
     rt_dirs
 }
 
+/// `.helix/runtime/` of the current workspace, if it exists and the workspace is trusted.
+///
+/// Tree-sitter grammars are native libraries, so a workspace-local runtime is only used
+/// when the workspace has been *explicitly* trusted (a persisted `:workspace-trust` grant;
+/// the grant's hash pin covers everything under `.helix/`). The trust check here
+/// deliberately uses the default (conservative) trust configuration: implicit trust levels
+/// and trusted globs from the user config are *not* honored, because the runtime directory
+/// list may be built before the config file is loaded.
+fn trusted_workspace_runtime_dir() -> Option<PathBuf> {
+    let dir = workspace_runtime_dir();
+    if !dir.is_dir() {
+        return None;
+    }
+    let trust = workspace_trust::WorkspaceTrust::new(workspace_trust::Config::default());
+    trust
+        .query_current(workspace_trust::TrustQuery::LocalConfig)
+        .is_trusted()
+        .then_some(dir)
+}
+
 /// Runtime directories ordered from highest to lowest priority
 ///
 /// All directories should be checked when looking for files.
 ///
+/// The list is computed lazily on first access, so by then the working directory from `-w`
+/// (if any) has been applied and workspace-relative entries resolve correctly.
+///
 /// Postcondition: returns at least one path (it might not exist).
 pub fn runtime_dirs() -> &'static [PathBuf] {
-    &RUNTIME_DIRS
+    RUNTIME_DIRS.get_or_init(|| {
+        prioritize_runtime_dirs(RUNTIME_DIR_OVERRIDE.get().cloned().flatten())
+    })
 }
 
 /// Find file with path relative to runtime directory
@@ -92,7 +172,7 @@ pub fn runtime_dirs() -> &'static [PathBuf] {
 /// The valid runtime directories are searched in priority order and the first
 /// file found to exist is returned, otherwise None.
 fn find_runtime_file(rel_path: &Path) -> Option<PathBuf> {
-    RUNTIME_DIRS.iter().find_map(|rt_dir| {
+    runtime_dirs().iter().find_map(|rt_dir| {
         let path = rt_dir.join(rel_path);
         if path.exists() {
             Some(path)
@@ -110,19 +190,53 @@ fn find_runtime_file(rel_path: &Path) -> Option<PathBuf> {
 /// that failed.
 pub fn runtime_file(rel_path: impl AsRef<Path>) -> PathBuf {
     find_runtime_file(rel_path.as_ref()).unwrap_or_else(|| {
-        RUNTIME_DIRS
+        runtime_dirs()
             .last()
             .map(|dir| dir.join(rel_path))
             .unwrap_or_default()
     })
 }
 
-pub fn config_dir() -> PathBuf {
-    // TODO: allow env var override
+/// The system default config directory (e.g. `$XDG_CONFIG_HOME/helix` on Linux).
+fn system_config_dir() -> PathBuf {
     let strategy = choose_base_strategy().expect("Unable to find the config directory!");
     let mut path = strategy.config_dir();
     path.push("helix");
     path
+}
+
+fn prioritize_config_dirs(specified_dir: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = specified_dir {
+        dirs.push(normalize_path(dir));
+    }
+    if let Ok(dir) = std::env::var("HELIX_CONFIG_DIR") {
+        dirs.push(normalize_path(dir.into()));
+    }
+    dirs.push(system_config_dir());
+    dirs
+}
+
+/// Config directories ordered from highest to lowest priority:
+///
+/// 1. the `--config-dir` command line argument
+/// 2. the `HELIX_CONFIG_DIR` environment variable
+/// 3. the system default (e.g. `$XDG_CONFIG_HOME/helix` on Linux)
+///
+/// Config files (`config.toml`, `languages.toml`, `themes/`, `runtime/`) missing from a
+/// higher-priority directory fall back to lower-priority ones. The system default is always
+/// present, so the list is never empty.
+pub fn config_dirs() -> &'static [PathBuf] {
+    CONFIG_DIRS.get_or_init(|| prioritize_config_dirs(None))
+}
+
+/// The highest-priority config directory. Files created by helix (e.g. via `:config-open`)
+/// are placed here.
+pub fn config_dir() -> PathBuf {
+    config_dirs()
+        .first()
+        .expect("config dirs are never empty")
+        .clone()
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -140,8 +254,10 @@ pub fn data_dir() -> PathBuf {
     path
 }
 
+/// The highest-priority config file: the last entry of [`config_file_overrides`], or
+/// `config.toml` inside the highest-priority config directory.
 pub fn config_file() -> PathBuf {
-    CONFIG_FILE.get().map(|path| path.to_path_buf()).unwrap()
+    effective_config_file(config_file_overrides())
 }
 
 pub fn log_file() -> PathBuf {
@@ -156,8 +272,64 @@ pub fn workspace_lang_config_file() -> PathBuf {
     find_workspace().0.join(".helix").join("languages.toml")
 }
 
+pub fn workspace_runtime_dir() -> PathBuf {
+    find_workspace().0.join(".helix").join("runtime")
+}
+
+fn config_file_override_chain(specified_file: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(file) = std::env::var("HELIX_CONFIG_FILE") {
+        files.push(normalize_path(file.into()));
+    }
+    if let Some(file) = specified_file {
+        files.push(normalize_path(file));
+    }
+    files
+}
+
+fn lang_config_file_override_chain(specified_file: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(file) = std::env::var("HELIX_LANGUAGES_FILE") {
+        files.push(normalize_path(file.into()));
+    }
+    if let Some(file) = specified_file {
+        files.push(normalize_path(file));
+    }
+    files
+}
+
+fn effective_config_file(overrides: &[PathBuf]) -> PathBuf {
+    overrides.last().cloned().unwrap_or_else(default_config_file)
+}
+
+/// Explicitly specified config files ordered from lowest to highest priority:
+///
+/// 1. the `HELIX_CONFIG_FILE` environment variable
+/// 2. the `--config` command line argument
+///
+/// These are merged *on top of* every `config.toml` found in [`config_dirs`] and on top of
+/// the workspace's `.helix/config.toml`, so an explicitly specified key always wins.
+pub fn config_file_overrides() -> &'static [PathBuf] {
+    CONFIG_FILE_OVERRIDES.get_or_init(|| config_file_override_chain(None))
+}
+
+/// Explicitly specified language config files ordered from lowest to highest priority:
+/// `HELIX_LANGUAGES_FILE`, then `--languages`.
+///
+/// These are merged *on top of* every `languages.toml` found in [`config_dirs`] and on top
+/// of the workspace's `.helix/languages.toml`.
+pub fn lang_config_file_overrides() -> &'static [PathBuf] {
+    LANG_CONFIG_FILE_OVERRIDES.get_or_init(|| lang_config_file_override_chain(None))
+}
+
+/// The highest-priority language config file: the last entry of
+/// [`lang_config_file_overrides`], or `languages.toml` inside the highest-priority config
+/// directory.
 pub fn lang_config_file() -> PathBuf {
-    config_dir().join("languages.toml")
+    lang_config_file_overrides()
+        .last()
+        .cloned()
+        .unwrap_or_else(|| config_dir().join("languages.toml"))
 }
 
 pub fn default_log_file() -> PathBuf {

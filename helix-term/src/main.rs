@@ -26,7 +26,10 @@ fn main() -> Result<()> {
 async fn main_impl() -> Result<i32> {
     let args = Args::parse_args().context("could not parse arguments")?;
 
+    helix_loader::initialize_config_dirs(args.config_dir.clone());
     helix_loader::initialize_config_file(args.config_file.clone());
+    helix_loader::initialize_lang_config_files(args.languages_file.clone());
+    helix_loader::set_runtime_dir_override(args.runtime_dir.clone());
     helix_loader::initialize_log_file(args.log_file.clone());
 
     // Help has a higher priority and should be handled separately.
@@ -54,6 +57,11 @@ FLAGS:
                                    the default is the same as 'all', but with languages filtering.
     -g, --grammar {{fetch|build}}    Fetch or builds tree-sitter grammars listed in languages.toml.
     -c, --config <file>            Specify a file to use for configuration
+    --config-dir <dir>             Specify a config directory (takes precedence over
+                                   HELIX_CONFIG_DIR and the default config directory)
+    --languages <file>             Specify a file to use for language configuration
+    --runtime-dir <dir>            Specify a runtime directory (takes precedence over
+                                   HELIX_RUNTIME)
     -v                             Increase logging verbosity each use for up to 3 times
     --log <file>                   Specify a file to use for logging
                                    (default file: {})
@@ -63,6 +71,13 @@ FLAGS:
     -w, --working-dir <path>       Specify an initial working directory
     +[N]                           Open the first given file at line number N, or the last line, if
                                    N is not specified.
+
+ENVIRONMENT VARIABLES:
+    HELIX_CONFIG_DIR       Config directory (lower priority than --config-dir)
+    HELIX_CONFIG_FILE      Config file (lower priority than --config)
+    HELIX_LANGUAGES_FILE   Language config file (lower priority than --languages)
+    HELIX_RUNTIME          Runtime directory (lower priority than --runtime-dir)
+    HELIX_LOG_LEVEL        Log level used for integration logging
 ",
             env!("CARGO_PKG_NAME"),
             VERSION_AND_GIT_HASH,
