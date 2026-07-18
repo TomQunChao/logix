@@ -80,12 +80,14 @@ impl Args {
                     None => anyhow::bail!("--config must specify a path to read"),
                 },
                 "--config-dir" => match argv.next().as_deref() {
-                    Some(path) if Path::new(path).is_dir() => {
-                        args.config_dir = Some(path.into())
+                    // A directory that does not exist yet is accepted; it is created
+                    // during initialization (see helix_loader::initialize_config_dirs)
+                    // so that e.g. `hx --config-dir ./new --grammar fetch` can
+                    // bootstrap a fresh config directory.
+                    Some(path) if Path::new(path).exists() && !Path::new(path).is_dir() => {
+                        anyhow::bail!("--config-dir specified is not a directory: {}", path)
                     }
-                    Some(path) => {
-                        anyhow::bail!("--config-dir specified does not exist or is not a directory: {}", path)
-                    }
+                    Some(path) => args.config_dir = Some(path.into()),
                     None => anyhow::bail!("--config-dir must specify a path to a directory"),
                 },
                 "--languages" => match argv.next().as_deref() {

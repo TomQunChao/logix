@@ -16,6 +16,12 @@ static RUNTIME_DIR_OVERRIDE: once_cell::sync::OnceCell<Option<PathBuf>> =
 
 static CONFIG_DIRS: once_cell::sync::OnceCell<Vec<PathBuf>> = once_cell::sync::OnceCell::new();
 
+/// The normalized `--config-dir` CLI argument, tracked separately from [`CONFIG_DIRS`]
+/// so that [`prioritize_runtime_dirs`] can rank its `runtime/` subdirectory above the
+/// implicit runtime locations (workspace, `CARGO_MANIFEST_DIR` sibling).
+static SPECIFIED_CONFIG_DIR: once_cell::sync::OnceCell<Option<PathBuf>> =
+    once_cell::sync::OnceCell::new();
+
 static CONFIG_FILE_OVERRIDES: once_cell::sync::OnceCell<Vec<PathBuf>> =
     once_cell::sync::OnceCell::new();
 
@@ -27,7 +33,19 @@ static LOG_FILE: once_cell::sync::OnceCell<PathBuf> = once_cell::sync::OnceCell:
 /// Initialize the config directory chain from the `--config-dir` CLI argument.
 ///
 /// See [`config_dirs`] for the priority order.
+///
+/// The explicitly specified directory is allowed to not exist yet (e.g. bootstrapping
+/// a fresh config dir via `hx --config-dir ./new --grammar fetch`) and is created here
+/// so that later lookups (config files, its `runtime/` subdirectory) have a stable
+/// location. Creation failures are ignored: subsequent operations that need the
+/// directory will surface their own errors.
 pub fn initialize_config_dirs(specified_dir: Option<PathBuf>) {
+    if let Some(dir) = &specified_dir {
+        std::fs::create_dir_all(dir).ok();
+    }
+    SPECIFIED_CONFIG_DIR
+        .set(specified_dir.clone().map(normalize_path))
+        .ok();
     CONFIG_DIRS
         .set(prioritize_config_dirs(specified_dir))
         .ok();
@@ -66,9 +84,21 @@ pub fn initialize_log_file(specified_file: Option<PathBuf>) {
     LOG_FILE.set(log_file).ok();
 }
 
-/// Expand `~` and normalize away `.`/`..` components.
+/// Expand `~`, absolutize relative paths against the current working directory and
+/// normalize away `.`/`..` components.
+///
+/// Absolutizing must happen before normalization: `path::normalize` resolves `..`
+/// lexically and drops leading `..` components of a relative path (e.g. `../cfg`
+/// would incorrectly become `cfg`). Pinning to the cwd at startup also keeps the
+/// paths stable when the working directory is changed later (e.g. via `-w`).
 fn normalize_path(path: PathBuf) -> PathBuf {
-    path::normalize(path::expand_tilde(&path))
+    let path = path::expand_tilde(&path);
+    let abs = if path.is_absolute() {
+        path.into_owned()
+    } else {
+        current_working_dir().join(path)
+    };
+    path::normalize(abs)
 }
 
 /// A list of runtime directories from highest to lowest priority
@@ -77,12 +107,14 @@ fn normalize_path(path: PathBuf) -> PathBuf {
 ///
 /// 1. the `--runtime-dir` command line argument
 /// 2. `HELIX_RUNTIME` (if the environment variable is set)
-/// 3. `.helix/runtime/` of the current workspace (only if the workspace is trusted,
+/// 3. `runtime/` inside the directory given by `--config-dir` (if any)
+/// 4. `.helix/runtime/` of the current workspace (only if the workspace is trusted,
 ///    see [`workspace_trust`])
-/// 4. sibling directory to `CARGO_MANIFEST_DIR` (if the environment variable is set)
-/// 5. `runtime/` inside each config directory (see [`config_dirs`], highest priority first)
-/// 6. `HELIX_DEFAULT_RUNTIME` (if the environment variable is set *at build time*)
-/// 7. subdirectory of path to helix executable (always included)
+/// 5. sibling directory to `CARGO_MANIFEST_DIR` (if the environment variable is set)
+/// 6. `runtime/` inside each remaining config directory (see [`config_dirs`], highest
+///    priority first)
+/// 7. `HELIX_DEFAULT_RUNTIME` (if the environment variable is set *at build time*)
+/// 8. subdirectory of path to helix executable (always included)
 ///
 /// Postcondition: returns at least two paths (they might not exist).
 fn prioritize_runtime_dirs(cli_dir: Option<PathBuf>) -> Vec<PathBuf> {
@@ -95,6 +127,19 @@ fn prioritize_runtime_dirs(cli_dir: Option<PathBuf>) -> Vec<PathBuf> {
 
     if let Ok(dir) = std::env::var("HELIX_RUNTIME") {
         rt_dirs.push(normalize_path(dir.into()));
+    }
+
+    // An explicitly specified `--config-dir` is the user's choice of config home, so its
+    // `runtime/` outranks the implicit locations below. In particular this makes it the
+    // write target of `--grammar fetch`/`--grammar build` (which use the first runtime
+    // directory) even when running from a source checkout via `cargo run`.
+    let specified_rt_dir = SPECIFIED_CONFIG_DIR
+        .get()
+        .cloned()
+        .flatten()
+        .map(|dir| dir.join(RT_DIR));
+    if let Some(dir) = &specified_rt_dir {
+        rt_dirs.push(dir.clone());
     }
 
     if let Some(dir) = trusted_workspace_runtime_dir() {
@@ -110,7 +155,11 @@ fn prioritize_runtime_dirs(cli_dir: Option<PathBuf>) -> Vec<PathBuf> {
     }
 
     for dir in config_dirs() {
-        rt_dirs.push(dir.join(RT_DIR));
+        let rt_dir = dir.join(RT_DIR);
+        // The `--config-dir` runtime was already added at a higher priority above.
+        if specified_rt_dir.as_ref() != Some(&rt_dir) {
+            rt_dirs.push(rt_dir);
+        }
     }
 
     // If this variable is set during build time, it will always be included

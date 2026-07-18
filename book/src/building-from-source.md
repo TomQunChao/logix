@@ -108,19 +108,25 @@ following order:
 
 1. The `--runtime-dir <dir>` command line argument.
 2. `$HELIX_RUNTIME`
-3. `runtime/` subdirectory of the workspace's `.helix` directory, but only when the
+3. `runtime/` subdirectory of the directory given by `--config-dir` (if any).
+4. `runtime/` subdirectory of the workspace's `.helix` directory, but only when the
    workspace is [trusted](./workspace-trust.md). Tree-sitter grammars are native libraries,
    so a workspace-local runtime requires an explicit trust grant.
-4. `runtime/` sibling directory to `$CARGO_MANIFEST_DIR` directory (this is intended for
+5. `runtime/` sibling directory to `$CARGO_MANIFEST_DIR` directory (this is intended for
    developing and testing helix only).
-5. `runtime/` subdirectory of each config directory: the `--config-dir` argument first,
-   then `$HELIX_CONFIG_DIR`, then the OS-dependent default (e.g. `~/.config/helix`).
-6. Distribution-specific fallback directory (set at compile time—not run time—
+6. `runtime/` subdirectory of each remaining config directory: `$HELIX_CONFIG_DIR` first,
+   then the OS-dependent default (e.g. `~/.config/helix`).
+7. Distribution-specific fallback directory (set at compile time—not run time—
    with the `HELIX_DEFAULT_RUNTIME` environment variable)
-7. `runtime/` subdirectory of path to Helix executable.
+8. `runtime/` subdirectory of path to Helix executable.
 
 This order also sets the priority for selecting which file will be used if multiple runtime
 directories have files with the same name.
+
+`hx --grammar fetch` and `hx --grammar build` write grammar sources and compiled grammars
+to the first directory in this list. For example, `hx --config-dir ./my-config --grammar
+fetch` fetches into `./my-config/runtime/`, while `--runtime-dir <dir>` redirects the
+output to `<dir>`.
 
 #### Note to packagers
 
