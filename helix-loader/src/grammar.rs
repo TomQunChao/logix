@@ -158,7 +158,11 @@ pub fn fetch_grammars(strict: bool) -> Result<()> {
     }
 
     if !git_updated.is_empty() {
-        println!("{} updated grammars", git_updated.len());
+        if crate::dry_run::is_enabled() {
+            println!("{} grammars would be updated", git_updated.len());
+        } else {
+            println!("{} updated grammars", git_updated.len());
+        }
         // We checked the vec is not empty, unwrapping will not panic
         let longest_id = git_updated.iter().map(|x| x.0.len()).max().unwrap();
         for (id, rev) in git_updated {
@@ -224,7 +228,11 @@ pub fn build_grammars(target: Option<String>, strict: bool) -> Result<()> {
     }
 
     if !built.is_empty() {
-        println!("{} grammars built now", built.len());
+        if crate::dry_run::is_enabled() {
+            println!("{} grammars would be built", built.len());
+        } else {
+            println!("{} grammars built now", built.len());
+        }
         println!("\t{:?}", built);
     }
 

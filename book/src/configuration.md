@@ -69,6 +69,40 @@ ones on conflicting keys. From lowest to highest priority:
 An explicitly specified file that does not exist is a startup error, while
 missing files in config directories are skipped silently.
 
+## Verifying the configuration with `--dry-run`
+
+`hx --dry-run` exercises the whole configuration pipeline without modifying
+the system: no directories are created, no files are written, and no editor
+is started. It prints a report containing:
+
+- the config and runtime directories that were searched (with an
+  exists/missing marker each),
+- every `config.toml` / `languages.toml` layer that was probed, in merge
+  order, with its outcome (loaded / not found / error),
+- the directories that *would* be created (e.g. a `--config-dir` that does
+  not exist yet, the log file's parent directory),
+- the synthesized (merged) editor configuration and theme, plus a summary of
+  the merged language configuration (language/grammar counts and the
+  `use-grammars` selection).
+
+This is useful to check that the config directory chain, file layering and
+workspace-trust gates behave as expected, for example when bootstrapping a
+new config directory:
+
+```sh
+hx --dry-run --config-dir ./my-config --config ./extra.toml
+```
+
+Combined with `--grammar fetch` or `--grammar build`, the dry-run additionally
+reports which grammars would be fetched or compiled. The `git` invocations
+and compiler runs are reported but **not** executed, so no network access
+takes place and nothing is written:
+
+```sh
+hx --dry-run --grammar fetch
+hx --dry-run --config-dir ./my-config --grammar build
+```
+
 ## Environment variables
 
 | Variable | Description |
