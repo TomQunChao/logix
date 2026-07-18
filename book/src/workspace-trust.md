@@ -5,6 +5,8 @@ Helix has several features that can execute arbitrary code:
 - Language servers (LSP)
 - Debug adapters (DAP)
 - Local workspace configuration (`.helix/config.toml`, `.helix/languages.toml`)
+- Local workspace runtime (`.helix/runtime/`, which may contain native
+  tree-sitter grammars)
 - Git integration (filters and other commands in a repository's `.git/config`)
 
 To protect against malicious projects (a checked-out PR, a freshly cloned

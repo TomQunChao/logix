@@ -33,3 +33,49 @@ signal to the Helix process, such as by using the command `pkill -USR1 hx`.
 Finally, you can have a `config.toml` and a `languages.toml` local to a project by putting it under a `.helix` directory in your repository.
 Its settings will be merged with the configuration directory and the built-in configuration.
 
+## Configuration directories
+
+Helix looks for `config.toml`, `languages.toml`, `themes/` and `runtime/` in a
+chain of config directories. The chain is ordered from highest to lowest
+priority:
+
+1. The `--config-dir <dir>` command line argument.
+2. The `HELIX_CONFIG_DIR` environment variable.
+3. The system default config directory (`~/.config/helix` on Linux and macOS,
+   `%AppData%\helix` on Windows).
+
+Files missing from a higher-priority directory fall back to lower-priority
+ones, and all directories that contain the file are merged together (see
+below). Files created by Helix (e.g. via `:config-open`) are placed in the
+highest-priority directory.
+
+## Configuration file merging
+
+`config.toml` and `languages.toml` are not loaded from a single location —
+all applicable layers are deep-merged, with higher layers overriding lower
+ones on conflicting keys. From lowest to highest priority:
+
+1. The built-in defaults (`languages.toml` is compiled into the binary;
+   `config.toml` uses built-in default values).
+2. `config.toml` / `languages.toml` in each config directory (system default
+   first, then `HELIX_CONFIG_DIR`, then `--config-dir`).
+3. The workspace's `.helix/config.toml` / `.helix/languages.toml`, but only
+   when the workspace is [trusted](./workspace-trust.md).
+4. An explicitly specified file: the `HELIX_CONFIG_FILE` /
+   `HELIX_LANGUAGES_FILE` environment variable.
+5. An explicitly specified file: the `-c`/`--config` or `--languages` command
+   line argument (highest priority).
+
+An explicitly specified file that does not exist is a startup error, while
+missing files in config directories are skipped silently.
+
+## Environment variables
+
+| Variable | Description |
+|---       |---          |
+| `HELIX_CONFIG_DIR` | Config directory (overridden by `--config-dir`). |
+| `HELIX_CONFIG_FILE` | Config file (overridden by `--config`). |
+| `HELIX_LANGUAGES_FILE` | Language config file (overridden by `--languages`). |
+| `HELIX_RUNTIME` | Runtime directory (overridden by `--runtime-dir`). See [multiple runtime directories](./building-from-source.md#multiple-runtime-directories). |
+| `HELIX_LOG_LEVEL` | Log level used for integration logging. |
+
