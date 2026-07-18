@@ -161,7 +161,7 @@ impl Transport {
         buffer: &mut String,
         language_server_name: &str,
     ) -> Result<()> {
-        buffer.truncate(0);
+        buffer.clear();
         if err.read_line(buffer).await? == 0 {
             return Err(Error::StreamClosed);
         };
@@ -316,7 +316,7 @@ impl Transport {
                     if !matches!(err, Error::StreamClosed) {
                         error!(
                             "Exiting {} after unexpected error: {err:?}",
-                            &transport.name
+                            transport.name
                         );
                     }
 

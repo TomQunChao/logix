@@ -153,8 +153,8 @@ impl FileTree {
         }
 
         // Sort: directories first, then files, both alphabetically
-        dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        dirs.sort_by_key(|a| a.name.to_lowercase());
+        files.sort_by_key(|a| a.name.to_lowercase());
 
         // Find insertion point
         let insert_idx = if depth == 0 {
@@ -169,7 +169,7 @@ impl FileTree {
         };
 
         // Insert entries
-        let all_entries: Vec<FileEntry> = dirs.into_iter().chain(files.into_iter()).collect();
+        let all_entries: Vec<FileEntry> = dirs.into_iter().chain(files).collect();
         for (i, entry) in all_entries.into_iter().enumerate() {
             self.entries.insert(insert_idx + i, entry);
         }
@@ -308,10 +308,10 @@ impl FileTree {
             }
         }
 
-        dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        dirs.sort_by_key(|a| a.name.to_lowercase());
+        files.sort_by_key(|a| a.name.to_lowercase());
 
-        let all_entries: Vec<FileEntry> = dirs.into_iter().chain(files.into_iter()).collect();
+        let all_entries: Vec<FileEntry> = dirs.into_iter().chain(files).collect();
         for (i, entry) in all_entries.into_iter().enumerate() {
             self.entries.insert(insert_idx + i, entry);
         }
