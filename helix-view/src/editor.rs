@@ -9,6 +9,7 @@ use crate::{
     handlers::Handlers,
     info::Info,
     input::KeyEvent,
+    keyboard::{KeyCode, KeyModifiers},
     register::Registers,
     theme::{self, Theme},
     tree::{self, Tree},
@@ -266,6 +267,98 @@ impl Default for FileExplorerConfig {
     }
 }
 
+/// Whether the file tree sidebar closes itself after a file is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FileTreeOpenBehavior {
+    /// Close the file tree automatically after opening a file.
+    #[default]
+    Auto,
+    /// The file tree stays open until it is closed explicitly.
+    Manual,
+}
+
+/// Key bindings used inside the file tree sidebar. Each key is given as a
+/// string in the same format as keymap definitions (e.g. `"v"`, `"S-v"`,
+/// `"ret"`, `"C-c"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct FileTreeKeys {
+    /// Close the file tree. Defaults to `q`.
+    pub quit: KeyEvent,
+    /// Open the selected file or directory. Defaults to `ret`.
+    pub open: KeyEvent,
+    /// Expand the selected directory (or open the selected file). Defaults to `l`.
+    pub expand: KeyEvent,
+    /// Collapse the selected directory. Defaults to `h`.
+    pub collapse: KeyEvent,
+    /// Refresh the tree from disk. Defaults to `S-r`.
+    pub refresh: KeyEvent,
+    /// Enter filter mode. Defaults to `/`.
+    pub filter: KeyEvent,
+    /// Toggle selection of the current file/directory. Defaults to `v`.
+    pub select: KeyEvent,
+    /// Select the range from the last selected entry to the current one. Defaults to `S-v`.
+    pub select_extend: KeyEvent,
+    /// Delete the selected (marked) files/directories, with confirmation. Defaults to `d`.
+    pub delete: KeyEvent,
+    /// Create a new file inside the selected directory. Defaults to `a`.
+    pub create_file: KeyEvent,
+    /// Create a new directory inside the selected directory. Defaults to `S-a`.
+    pub create_dir: KeyEvent,
+    /// Collapse the current directory and move to its parent. Defaults to `p`.
+    pub parent: KeyEvent,
+    /// Move selection to the first entry. Defaults to `g`.
+    pub goto_top: KeyEvent,
+    /// Move selection to the last entry. Defaults to `S-g`.
+    pub goto_bottom: KeyEvent,
+    /// Move selection up. Defaults to `k`.
+    pub move_up: KeyEvent,
+    /// Move selection down. Defaults to `j`.
+    pub move_down: KeyEvent,
+}
+
+impl Default for FileTreeKeys {
+    fn default() -> Self {
+        const fn key(code: KeyCode) -> KeyEvent {
+            KeyEvent {
+                code,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+        Self {
+            quit: key(KeyCode::Char('q')),
+            open: key(KeyCode::Enter),
+            expand: key(KeyCode::Char('l')),
+            collapse: key(KeyCode::Char('h')),
+            refresh: key(KeyCode::Char('R')),
+            filter: key(KeyCode::Char('/')),
+            select: key(KeyCode::Char('v')),
+            select_extend: key(KeyCode::Char('V')),
+            delete: key(KeyCode::Char('d')),
+            create_file: key(KeyCode::Char('a')),
+            create_dir: key(KeyCode::Char('A')),
+            parent: key(KeyCode::Char('p')),
+            goto_top: key(KeyCode::Char('g')),
+            goto_bottom: key(KeyCode::Char('G')),
+            move_up: key(KeyCode::Char('k')),
+            move_down: key(KeyCode::Char('j')),
+        }
+    }
+}
+
+/// Configuration of the file tree sidebar (`[editor.file-tree]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct FileTreeConfig {
+    /// When the file tree closes after a file is opened from it: `auto`
+    /// closes it automatically, `manual` keeps it open until it is closed
+    /// explicitly. Defaults to `auto`.
+    pub open_behavior: FileTreeOpenBehavior,
+    /// Key bindings used inside the file tree sidebar.
+    pub keys: FileTreeKeys,
+}
+
 fn serialize_alphabet<S>(alphabet: &[char], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -366,6 +459,7 @@ pub struct Config {
     pub auto_info: bool,
     pub file_picker: FilePickerConfig,
     pub file_explorer: FileExplorerConfig,
+    pub file_tree: FileTreeConfig,
     /// Configuration of the statusline elements
     pub statusline: StatusLineConfig,
     /// Shape for cursor in each mode
@@ -1203,6 +1297,7 @@ impl Default for Config {
             auto_info: true,
             file_picker: FilePickerConfig::default(),
             file_explorer: FileExplorerConfig::default(),
+            file_tree: FileTreeConfig::default(),
             statusline: StatusLineConfig::default(),
             cursor_shape: CursorShapeConfig::default(),
             true_color: false,

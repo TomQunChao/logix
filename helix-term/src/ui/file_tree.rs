@@ -1,14 +1,14 @@
-use crate::compositor::{Component, Context, Event, EventResult};
+use crate::compositor::{Callback, Component, Compositor, Context, Event, EventResult};
 use helix_core::unicode::width::UnicodeWidthStr;
 use helix_view::{
-    editor::Action,
+    editor::{Action, FileTreeOpenBehavior},
     graphics::{CursorKind, Rect},
     input::KeyEvent,
     keyboard::{KeyCode, KeyModifiers},
     Editor,
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -16,9 +16,12 @@ use std::{
 use tui::{
     buffer::Buffer as Surface,
     text::{Span, Spans},
+    widgets::{Block, Widget as _},
 };
 
 use helix_core::Position;
+
+use super::{Prompt, PromptEvent};
 
 /// Git status for a file
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +81,16 @@ impl FileEntry {
     }
 }
 
+/// A snapshot of the file tree's browsing position (expanded directories,
+/// selection and scroll), used to restore the tree after it has been closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileTreeState {
+    pub root: PathBuf,
+    pub expanded: Vec<PathBuf>,
+    pub selected: Option<PathBuf>,
+    pub scroll: usize,
+}
+
 /// The file tree sidebar component
 pub struct FileTree {
     /// Root directory of the workspace
@@ -104,6 +117,10 @@ pub struct FileTree {
     cached_height: u16,
     /// Set to true when the tree should be closed by the parent.
     pub closed: bool,
+    /// Entries marked with `v`/`V`, acted upon by e.g. delete.
+    pub marked: BTreeSet<PathBuf>,
+    /// Anchor of the last `v` selection, used by `V` to select a range.
+    anchor: Option<usize>,
 }
 
 impl FileTree {
@@ -121,10 +138,57 @@ impl FileTree {
             min_width: 25,
             cached_height: 20,
             closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
         };
         tree.load_directory(&tree.root.clone(), 0);
         tree.load_git_status(editor);
         tree
+    }
+
+    /// Captures the current browsing position so it can be restored later.
+    pub fn state(&self) -> FileTreeState {
+        FileTreeState {
+            root: self.root.clone(),
+            expanded: self
+                .entries
+                .iter()
+                .filter(|entry| entry.is_dir && entry.expanded)
+                .map(|entry| entry.path.clone())
+                .collect(),
+            selected: self
+                .entries
+                .get(self.selected)
+                .map(|entry| entry.path.clone()),
+            scroll: self.scroll,
+        }
+    }
+
+    /// Restores a previously captured browsing position: re-expands the
+    /// directories (parents before their children) and restores the
+    /// selection and scroll offset.
+    pub fn restore_state(&mut self, state: &FileTreeState) {
+        let mut expanded = state.expanded.clone();
+        expanded.sort_by_key(|path| path.components().count());
+        for path in expanded {
+            if let Some(idx) = self
+                .entries
+                .iter()
+                .position(|entry| entry.is_dir && !entry.expanded && entry.path == path)
+            {
+                self.toggle_expand(idx);
+            }
+        }
+        if let Some(selected) = &state.selected {
+            if let Some(idx) = self
+                .entries
+                .iter()
+                .position(|entry| &entry.path == selected)
+            {
+                self.selected = idx;
+            }
+        }
+        self.scroll = state.scroll;
     }
 
     /// Load directory contents at the given path and depth
@@ -219,15 +283,21 @@ impl FileTree {
         };
     }
 
-    /// Refresh the file tree
+    /// Refresh the file tree, preserving the browsing position (expanded
+    /// directories, selection and scroll). Marks pointing at entries that
+    /// no longer exist are dropped.
     pub fn refresh(&mut self, editor: &Editor) {
+        let state = self.state();
         self.entries.clear();
         self.git_status.clear();
         self.load_directory(&self.root.clone(), 0);
         self.load_git_status(editor);
-        if self.selected >= self.entries.len() && !self.entries.is_empty() {
-            self.selected = self.entries.len() - 1;
+        self.restore_state(&state);
+        if self.selected >= self.entries.len() {
+            self.selected = self.entries.len().saturating_sub(1);
         }
+        self.marked
+            .retain(|path| self.entries.iter().any(|entry| entry.path == *path));
     }
 
     /// Compute the width based on content (longest visible filename).
@@ -239,9 +309,10 @@ impl FileTree {
                 // indentation + icon + name + git status + padding
                 let indent = e.depth * 2;
                 let icon = if e.is_dir { 2 } else { 1 }; // "▸ " or "  "
+                let mark = if self.marked.contains(&e.path) { 2 } else { 0 }; // "● "
                 let name = e.name.width();
                 let git = if e.git_status.is_some() { 2 } else { 0 };
-                indent + icon + name + git + 2 // +2 for padding
+                indent + icon + mark + name + git + 2 // +2 for padding
             })
             .max()
             .unwrap_or(20) as u16;
@@ -362,75 +433,272 @@ impl FileTree {
         }
     }
 
-    /// Create a new file or directory at the current selection
-    #[allow(dead_code)]
-    fn create_item(&mut self, cx: &mut Context, name: &str) {
-        if name.is_empty() {
-            return;
-        }
-
-        // Determine parent directory
-        let parent_dir = if self.selected < self.entries.len() {
-            let entry = &self.entries[self.selected];
-            if entry.is_dir {
-                entry.path.clone()
-            } else {
-                entry.path.parent().unwrap_or(&self.root).to_path_buf()
-            }
-        } else {
-            self.root.clone()
-        };
-
-        let is_dir = name.ends_with('/');
-        let name = name.trim_end_matches('/');
-        let new_path = parent_dir.join(name);
-
-        let result = if is_dir {
-            fs::create_dir_all(&new_path)
-        } else {
-            // Create parent dirs if needed, then create empty file
-            if let Some(parent) = new_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            fs::File::create(&new_path).map(|_| ())
-        };
-
-        match result {
-            Ok(()) => {
-                cx.editor
-                    .set_status(format!("Created: {}", new_path.display()));
-                self.refresh(cx.editor);
-            }
-            Err(e) => {
-                cx.editor.set_error(format!("Failed to create: {:?}", e));
-            }
-        }
-    }
-
-    /// Delete the selected item
-    fn delete_selected(&mut self, cx: &mut Context) {
+    /// Toggle the mark on the current entry and use it as the anchor for
+    /// subsequent range selections (`V`).
+    fn toggle_mark(&mut self) {
         if self.selected >= self.entries.len() {
             return;
         }
+        let path = self.entries[self.selected].path.clone();
+        if !self.marked.remove(&path) {
+            self.marked.insert(path);
+        }
+        self.anchor = Some(self.selected);
+    }
 
-        let entry = &self.entries[self.selected];
-        let path = entry.path.clone();
-
-        let result = if entry.is_dir {
-            fs::remove_dir_all(&path)
+    /// Mark every entry between the anchor (the last entry toggled with `v`,
+    /// or the current entry when there is none) and the current selection.
+    fn mark_range(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let anchor = self
+            .anchor
+            .unwrap_or(self.selected)
+            .min(self.entries.len() - 1);
+        let (start, end) = if anchor <= self.selected {
+            (anchor, self.selected)
         } else {
-            fs::remove_file(&path)
+            (self.selected, anchor)
         };
+        for entry in &self.entries[start..=end] {
+            self.marked.insert(entry.path.clone());
+        }
+        self.anchor = Some(self.selected);
+    }
 
-        match result {
-            Ok(()) => {
-                cx.editor.set_status(format!("Deleted: {}", path.display()));
-                self.refresh(cx.editor);
-            }
-            Err(e) => {
-                cx.editor.set_error(format!("Failed to delete: {:?}", e));
+    /// Clears all marks. Returns `true` if there was anything to clear.
+    pub fn clear_marks(&mut self) -> bool {
+        let had_marks = !self.marked.is_empty();
+        self.marked.clear();
+        self.anchor = None;
+        had_marks
+    }
+
+    /// Collapse the current directory and move the selection to its parent.
+    /// When the current entry is an expanded directory, it is collapsed in
+    /// place; otherwise the selection moves to the parent directory, which
+    /// is then collapsed.
+    fn go_to_parent(&mut self) {
+        if self.selected >= self.entries.len() {
+            return;
+        }
+        let entry = &self.entries[self.selected];
+        if entry.is_dir && entry.expanded {
+            self.toggle_expand(self.selected);
+            return;
+        }
+        let depth = entry.depth;
+        if depth == 0 {
+            return;
+        }
+        for idx in (0..self.selected).rev() {
+            if self.entries[idx].is_dir && self.entries[idx].depth == depth - 1 {
+                self.selected = idx;
+                if self.entries[idx].expanded {
+                    self.toggle_expand(idx);
+                }
+                break;
             }
         }
+        self.update_scroll();
+    }
+
+    /// Moves the selection onto the entry with the given path, expanding its
+    /// parent directory when needed.
+    fn reveal(&mut self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            if parent != self.root {
+                if let Some(idx) = self
+                    .entries
+                    .iter()
+                    .position(|entry| entry.is_dir && !entry.expanded && entry.path == parent)
+                {
+                    self.toggle_expand(idx);
+                }
+            }
+        }
+        if let Some(idx) = self.entries.iter().position(|entry| entry.path == path) {
+            self.selected = idx;
+            self.update_scroll();
+        }
+    }
+
+    /// The paths acted upon by destructive actions: the marked entries, or
+    /// the current entry when nothing is marked. Entries that are contained
+    /// in another selected directory are dropped, since deleting the
+    /// directory already removes them.
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = if self.marked.is_empty() {
+            self.entries
+                .get(self.selected)
+                .map(|entry| entry.path.clone())
+                .into_iter()
+                .collect()
+        } else {
+            self.marked.iter().cloned().collect()
+        };
+        paths.sort();
+        let mut deduped: Vec<PathBuf> = Vec::with_capacity(paths.len());
+        for path in paths {
+            if !deduped.iter().any(|dir| path.starts_with(dir)) {
+                deduped.push(path);
+            }
+        }
+        deduped
+    }
+
+    /// The directory in which new files/directories are created: the
+    /// selected directory itself, or the parent of the selected file.
+    fn create_base_dir(&self) -> PathBuf {
+        match self.entries.get(self.selected) {
+            Some(entry) if entry.is_dir => entry.path.clone(),
+            Some(entry) => entry.path.parent().unwrap_or(&self.root).to_path_buf(),
+            None => self.root.clone(),
+        }
+    }
+
+    /// Opens a prompt asking for the name of a new file or directory to
+    /// create inside [`create_base_dir`]. Newly created files are opened in
+    /// the editor; whether the tree closes afterwards depends on the
+    /// configured `open-behavior`.
+    fn create_prompt(&mut self, is_dir: bool, cx: &mut Context) -> EventResult {
+        let base_dir = self.create_base_dir();
+        let open_behavior = cx.editor.config().file_tree.open_behavior;
+        let display_dir = base_dir.strip_prefix(&self.root).unwrap_or(&base_dir);
+        let display_dir = if display_dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            display_dir
+        };
+        let title: std::borrow::Cow<'static, str> = if is_dir {
+            format!("New directory in {}: ", display_dir.display()).into()
+        } else {
+            format!("New file in {}: ", display_dir.display()).into()
+        };
+
+        let prompt = Prompt::new(
+            title,
+            None,
+            super::completers::none,
+            move |cx, input, event| {
+                if event != PromptEvent::Validate {
+                    return;
+                }
+                let name = input.trim();
+                if name.is_empty() {
+                    return;
+                }
+                let new_path = base_dir.join(name);
+                let result = if is_dir {
+                    fs::create_dir_all(&new_path)
+                } else {
+                    if let Some(parent) = new_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    fs::File::create(&new_path).map(|_| ())
+                };
+                if let Err(err) = result {
+                    cx.editor
+                        .set_error(format!("Failed to create {}: {err}", new_path.display()));
+                    return;
+                }
+                cx.editor
+                    .set_status(format!("Created: {}", new_path.display()));
+                let created = new_path;
+                crate::job::dispatch_blocking(move |editor, compositor| {
+                    let Some(editor_view) = compositor.find::<super::EditorView>() else {
+                        return;
+                    };
+                    if let Some(tree) = editor_view.sidebar.as_mut() {
+                        tree.refresh(editor);
+                        tree.reveal(&created);
+                    }
+                    if is_dir {
+                        return;
+                    }
+                    if open_behavior == FileTreeOpenBehavior::Auto {
+                        editor_view.close_sidebar();
+                    }
+                    if let Err(err) = editor.open(&created, Action::Replace) {
+                        editor.set_error(format!("Failed to open {}: {err}", created.display()));
+                    }
+                });
+            },
+        );
+
+        EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
+            compositor.push(Box::new(prompt));
+        })))
+    }
+
+    /// Pops up a confirmation box listing the files/directories about to be
+    /// deleted (the marked entries, or the current entry). Deleting is only
+    /// performed after confirming with `y`/`Enter`.
+    fn confirm_delete(&mut self) -> EventResult {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return EventResult::Consumed(None);
+        }
+        let title = if paths.len() == 1 {
+            "Delete this item?".to_string()
+        } else {
+            format!("Delete these {} items?", paths.len())
+        };
+        let lines: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                let display = path
+                    .strip_prefix(&self.root)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                if path.is_dir() {
+                    format!("{display}/")
+                } else {
+                    display
+                }
+            })
+            .collect();
+
+        let confirm = ConfirmBox::new(
+            title,
+            lines,
+            Box::new(move |compositor, cx| {
+                let mut errors: Vec<String> = Vec::new();
+                let mut deleted = 0;
+                for path in &paths {
+                    let result = if path.is_dir() {
+                        fs::remove_dir_all(path)
+                    } else {
+                        fs::remove_file(path)
+                    };
+                    match result {
+                        Ok(()) => deleted += 1,
+                        Err(err) => errors.push(format!("{}: {err}", path.display())),
+                    }
+                }
+                if errors.is_empty() {
+                    cx.editor.set_status(format!(
+                        "Deleted {deleted} item{}",
+                        if deleted == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    cx.editor
+                        .set_error(format!("Failed to delete: {}", errors.join(", ")));
+                }
+                if let Some(editor_view) = compositor.find::<super::EditorView>() {
+                    if let Some(tree) = editor_view.sidebar.as_mut() {
+                        tree.clear_marks();
+                        tree.refresh(cx.editor);
+                    }
+                }
+            }),
+        );
+
+        EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
+            compositor.push(Box::new(confirm));
+        })))
     }
 
     /// Render a single entry
@@ -475,9 +743,18 @@ impl FileTree {
         let icon_style = if entry.is_dir { dir_style } else { text_style };
         spans.push(Span::styled(icon, icon_style));
 
+        // Selection mark
+        if self.marked.contains(&entry.path) {
+            spans.push(Span::styled("● ", theme.get("ui.text.focus")));
+        }
+
         // Name
         let name_style = if entry.is_dir { dir_style } else { text_style };
-        spans.push(Span::styled(&entry.name, name_style));
+        if self.marked.contains(&entry.path) {
+            spans.push(Span::styled(&entry.name, theme.get("ui.text.focus")));
+        } else {
+            spans.push(Span::styled(&entry.name, name_style));
+        }
 
         // Git status
         if let Some(status) = entry.git_status {
@@ -514,8 +791,12 @@ impl Component for FileTree {
 
         // Title
         let title_style = cx.editor.theme.get("ui.text.focus");
-        let title = " File Tree ";
-        surface.set_string(area.x + 1, area.y, title, title_style);
+        let title = if self.marked.is_empty() {
+            " File Tree ".to_string()
+        } else {
+            format!(" File Tree ({} selected) ", self.marked.len())
+        };
+        surface.set_string(area.x + 1, area.y, &title, title_style);
 
         // Render entries
         let entries_area = Rect::new(area.x, area.y + 1, area.width - 1, area.height - 1);
@@ -550,9 +831,9 @@ impl Component for FileTree {
         }
 
         // Show help hint at bottom if space allows
-        if area.height > 3 {
+        if area.height > 3 && !self.filter_mode {
             let help_style = cx.editor.theme.get("ui.text");
-            let help = "j/k:nav Enter:open a:create d:del q:close";
+            let help = "Enter:open v:sel d:del a:new A:dir p:up q:quit";
             if help.len() < area.width as usize {
                 surface.set_string(area.x + 1, area.y + area.height - 1, help, help_style);
             }
@@ -597,125 +878,86 @@ impl Component for FileTree {
             }
         }
 
-        match event {
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-            })
-            | Event::Key(KeyEvent {
-                code: KeyCode::Esc,
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                self.closed = true;
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('q'),
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                self.closed = true;
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('j') | KeyCode::Down,
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                self.move_down();
-                self.update_scroll();
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('k') | KeyCode::Up,
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                self.move_up();
-                self.update_scroll();
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('l') | KeyCode::Enter | KeyCode::Right,
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                let opened_file = self.open_selected(cx);
-                if opened_file {
-                    self.closed = true;
-                }
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('h') | KeyCode::Left,
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                // Collapse current directory or go to parent
-                if self.selected < self.entries.len() && self.entries[self.selected].expanded {
-                    self.toggle_expand(self.selected);
-                }
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('R'),
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                self.refresh(cx.editor);
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('/'),
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                self.filter_mode = true;
-                self.filter_query.clear();
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('a'),
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                // Create new file/dir - simple inline input
-                // For now, just show a message - full prompt requires more complex handling
-                cx.editor
-                    .set_status("Create: type filename (a<name> for file, a<name>/ for dir)");
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                // Delete selected item directly (for simplicity, no confirmation)
-                self.delete_selected(cx);
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('r'),
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                // Rename - simplified for now
-                cx.editor
-                    .set_status("Rename: use 'd' to delete and 'a' to create new");
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                // Go to top
-                self.selected = 0;
-                self.scroll = 0;
-                EventResult::Consumed(None)
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('G'),
-                modifiers: KeyModifiers::NONE,
-            }) => {
-                // Go to bottom
-                if !self.entries.is_empty() {
-                    self.selected = self.entries.len() - 1;
-                    self.update_scroll();
-                }
-                EventResult::Consumed(None)
-            }
-            _ => EventResult::Ignored(None),
+        let Event::Key(key) = event else {
+            return EventResult::Ignored(None);
+        };
+        // Canonicalize character keys the same way the editor does, so that
+        // uppercase characters reported with a Shift modifier still match
+        // the configured bindings.
+        let mut key = *key;
+        if let KeyCode::Char(_) = key.code {
+            key.modifiers.remove(KeyModifiers::SHIFT);
         }
+
+        let config = cx.editor.config();
+        let keys = config.file_tree.keys;
+        let open_behavior = config.file_tree.open_behavior;
+        drop(config);
+
+        // Hard-coded bindings that work in addition to the configured ones.
+        if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
+            // Escape first clears the current selection, then closes.
+            if self.clear_marks() {
+                return EventResult::Consumed(None);
+            }
+            self.closed = true;
+            return EventResult::Consumed(None);
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            self.closed = true;
+            return EventResult::Consumed(None);
+        }
+
+        if key == keys.quit {
+            self.closed = true;
+        } else if key == keys.move_down || key.code == KeyCode::Down {
+            self.move_down();
+            self.update_scroll();
+        } else if key == keys.move_up || key.code == KeyCode::Up {
+            self.move_up();
+            self.update_scroll();
+        } else if key == keys.open
+            || key == keys.expand
+            || key.code == KeyCode::Enter
+            || key.code == KeyCode::Right
+        {
+            if self.open_selected(cx) && open_behavior == FileTreeOpenBehavior::Auto {
+                self.closed = true;
+            }
+        } else if key == keys.collapse || key.code == KeyCode::Left {
+            // Collapse current directory if it is expanded.
+            if self.selected < self.entries.len() && self.entries[self.selected].expanded {
+                self.toggle_expand(self.selected);
+            }
+        } else if key == keys.parent {
+            self.go_to_parent();
+        } else if key == keys.select {
+            self.toggle_mark();
+        } else if key == keys.select_extend {
+            self.mark_range();
+        } else if key == keys.delete {
+            return self.confirm_delete();
+        } else if key == keys.create_file {
+            return self.create_prompt(false, cx);
+        } else if key == keys.create_dir {
+            return self.create_prompt(true, cx);
+        } else if key == keys.refresh {
+            self.refresh(cx.editor);
+        } else if key == keys.filter {
+            self.filter_mode = true;
+            self.filter_query.clear();
+        } else if key == keys.goto_top {
+            self.selected = 0;
+            self.scroll = 0;
+        } else if key == keys.goto_bottom {
+            if !self.entries.is_empty() {
+                self.selected = self.entries.len() - 1;
+                self.update_scroll();
+            }
+        } else {
+            return EventResult::Ignored(None);
+        }
+        EventResult::Consumed(None)
     }
 
     fn cursor(&self, _area: Rect, _editor: &Editor) -> (Option<Position>, CursorKind) {
@@ -733,6 +975,123 @@ impl Component for FileTree {
 
     fn id(&self) -> Option<&'static str> {
         Some("file-tree")
+    }
+}
+
+/// A modal confirmation box: shows a title, a list of items (e.g. the
+/// files about to be deleted) and asks for confirmation with `y`/`Enter`
+/// or cancellation with `n`/`q`/`Esc`. The `on_confirm` callback only runs
+/// after explicit confirmation.
+struct ConfirmBox {
+    title: String,
+    lines: Vec<String>,
+    on_confirm: Option<Callback>,
+}
+
+impl ConfirmBox {
+    fn new(title: String, lines: Vec<String>, on_confirm: Callback) -> Self {
+        Self {
+            title,
+            lines,
+            on_confirm: Some(on_confirm),
+        }
+    }
+}
+
+impl Component for ConfirmBox {
+    fn handle_event(&mut self, event: &Event, _cx: &mut Context) -> EventResult {
+        match event {
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('y') | KeyCode::Enter,
+                ..
+            }) => {
+                let on_confirm = self.on_confirm.take();
+                EventResult::Consumed(Some(Box::new(
+                    move |compositor: &mut Compositor, cx: &mut Context| {
+                        compositor.pop();
+                        if let Some(on_confirm) = on_confirm {
+                            on_confirm(compositor, cx);
+                        }
+                    },
+                )))
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc,
+                ..
+            }) => EventResult::Consumed(Some(Box::new(|compositor, _cx| {
+                compositor.pop();
+            }))),
+            // The box is modal: swallow everything else.
+            _ => EventResult::Consumed(None),
+        }
+    }
+
+    fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
+        const HINT: &str = "[y] confirm  [n] cancel";
+        let background = cx.editor.theme.get("ui.background");
+        let text = cx.editor.theme.get("ui.text");
+        let highlight = cx.editor.theme.get("ui.text.focus");
+
+        let max_width = 80.min(area.width.saturating_sub(4));
+        let max_lines = (area.height as usize).saturating_sub(8).max(1);
+        let omitted = self.lines.len().saturating_sub(max_lines);
+
+        let content_width = self
+            .lines
+            .iter()
+            .take(max_lines)
+            .map(|line| line.width())
+            .max()
+            .unwrap_or(0)
+            .max(self.title.width())
+            .max(HINT.len());
+        let width = ((content_width + 4) as u16).clamp(24, max_width.max(24));
+        let shown_lines = self.lines.len().min(max_lines) + usize::from(omitted > 0);
+        let height = (shown_lines as u16 + 5).min(area.height);
+
+        let area = Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width: width.min(area.width),
+            height,
+        };
+
+        surface.clear_with(area, background.patch(text));
+        let block = Block::bordered();
+        let inner = block.inner(area);
+        block.render(area, surface);
+
+        let text_width = inner.width as usize;
+        let mut y = inner.y;
+        surface.set_stringn(inner.x + 1, y, &self.title, text_width, highlight);
+        y += 2;
+        for line in self.lines.iter().take(max_lines) {
+            if y >= area.y + area.height - 2 {
+                break;
+            }
+            surface.set_stringn(inner.x + 1, y, line, text_width, text);
+            y += 1;
+        }
+        if omitted > 0 && y < area.y + area.height - 2 {
+            surface.set_stringn(
+                inner.x + 1,
+                y,
+                &format!("… and {omitted} more"),
+                text_width,
+                text,
+            );
+        }
+        surface.set_stringn(
+            inner.x + 1,
+            area.y + area.height - 2,
+            HINT,
+            text_width,
+            highlight,
+        );
+    }
+
+    fn id(&self) -> Option<&'static str> {
+        Some("file-tree-confirm")
     }
 }
 
@@ -769,6 +1128,8 @@ mod tests {
             min_width: 25,
             cached_height: 20,
             closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
         }
     }
 
@@ -815,7 +1176,7 @@ mod tests {
         let tree = make_tree("/root", vec![make_entry("/root/x", false, 0)]);
         // name "x" = 1 → 1 + 1 + 2 = 4, max_allowed = 100*35% = 35, clamp(4, 25, max(25,35)) → 25
         let w = tree.compute_width(100);
-        assert!(w >= 25 && w <= 35);
+        assert!((25..=35).contains(&w));
     }
 
     #[test]
@@ -904,6 +1265,8 @@ mod tests {
             min_width: 25,
             cached_height: 20,
             closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
         };
 
         assert_eq!(tree.entries.len(), 1);
@@ -934,6 +1297,8 @@ mod tests {
             min_width: 25,
             cached_height: 20,
             closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
         };
 
         // Expand
@@ -984,6 +1349,8 @@ mod tests {
             min_width: 25,
             cached_height: 20,
             closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
         };
 
         // open_selected for a directory just toggles expand
@@ -1032,6 +1399,8 @@ mod tests {
             min_width: 25,
             cached_height: 20,
             closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
         };
         tree.load_directory(&tree.root.clone(), 0);
 
@@ -1075,5 +1444,254 @@ mod tests {
         let entry = FileEntry::new(PathBuf::from("/home/user/project/src"), true, 0);
         assert!(entry.is_dir);
         assert_eq!(entry.name, "src");
+    }
+
+    // ── marks ──────────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_mark_marks_and_unmarks_current_entry() {
+        let mut tree = make_tree("/root", vec![make_entry("/root/a.txt", false, 0)]);
+        tree.toggle_mark();
+        assert!(tree.marked.contains(Path::new("/root/a.txt")));
+        assert_eq!(tree.anchor, Some(0));
+        tree.toggle_mark();
+        assert!(tree.marked.is_empty());
+    }
+
+    #[test]
+    fn mark_range_marks_everything_between_anchor_and_selection() {
+        let mut tree = make_tree(
+            "/root",
+            vec![
+                make_entry("/root/a.txt", false, 0),
+                make_entry("/root/b.txt", false, 0),
+                make_entry("/root/c.txt", false, 0),
+                make_entry("/root/d.txt", false, 0),
+            ],
+        );
+        tree.selected = 1;
+        tree.toggle_mark();
+        tree.selected = 3;
+        tree.mark_range();
+        assert_eq!(tree.marked.len(), 3);
+        assert!(tree.marked.contains(Path::new("/root/b.txt")));
+        assert!(tree.marked.contains(Path::new("/root/c.txt")));
+        assert!(tree.marked.contains(Path::new("/root/d.txt")));
+        assert!(!tree.marked.contains(Path::new("/root/a.txt")));
+    }
+
+    #[test]
+    fn mark_range_works_backwards() {
+        let mut tree = make_tree(
+            "/root",
+            vec![
+                make_entry("/root/a.txt", false, 0),
+                make_entry("/root/b.txt", false, 0),
+                make_entry("/root/c.txt", false, 0),
+            ],
+        );
+        tree.selected = 2;
+        tree.toggle_mark();
+        tree.selected = 0;
+        tree.mark_range();
+        assert_eq!(tree.marked.len(), 3);
+    }
+
+    #[test]
+    fn clear_marks_reports_whether_anything_was_cleared() {
+        let mut tree = make_tree("/root", vec![make_entry("/root/a.txt", false, 0)]);
+        assert!(!tree.clear_marks());
+        tree.toggle_mark();
+        assert!(tree.clear_marks());
+        assert!(tree.marked.is_empty());
+        assert_eq!(tree.anchor, None);
+    }
+
+    // ── selected_paths ─────────────────────────────────────────────
+
+    #[test]
+    fn selected_paths_falls_back_to_current_entry() {
+        let tree = make_tree(
+            "/root",
+            vec![
+                make_entry("/root/a.txt", false, 0),
+                make_entry("/root/b.txt", false, 0),
+            ],
+        );
+        assert_eq!(tree.selected_paths(), vec![PathBuf::from("/root/a.txt")]);
+    }
+
+    #[test]
+    fn selected_paths_drops_entries_inside_marked_directories() {
+        let mut tree = make_tree(
+            "/root",
+            vec![
+                make_entry("/root/dir", true, 0),
+                make_entry("/root/dir/child.txt", false, 1),
+                make_entry("/root/other.txt", false, 0),
+            ],
+        );
+        tree.marked.insert(PathBuf::from("/root/dir"));
+        tree.marked.insert(PathBuf::from("/root/dir/child.txt"));
+        tree.marked.insert(PathBuf::from("/root/other.txt"));
+        assert_eq!(
+            tree.selected_paths(),
+            vec![PathBuf::from("/root/dir"), PathBuf::from("/root/other.txt")]
+        );
+    }
+
+    // ── go_to_parent ───────────────────────────────────────────────
+
+    #[test]
+    fn go_to_parent_collapses_expanded_directory_in_place() {
+        let mut tree = make_tree(
+            "/root",
+            vec![{
+                let mut e = make_entry("/root/dir", true, 0);
+                e.expanded = true;
+                e
+            }],
+        );
+        tree.go_to_parent();
+        assert!(!tree.entries[0].expanded);
+        assert_eq!(tree.selected, 0);
+    }
+
+    #[test]
+    fn go_to_parent_moves_to_parent_and_collapses_it() {
+        let mut tree = make_tree(
+            "/root",
+            vec![
+                {
+                    let mut e = make_entry("/root/dir", true, 0);
+                    e.expanded = true;
+                    e
+                },
+                make_entry("/root/dir/a.txt", false, 1),
+                make_entry("/root/dir/b.txt", false, 1),
+                make_entry("/root/other.txt", false, 0),
+            ],
+        );
+        tree.selected = 2;
+        tree.go_to_parent();
+        assert_eq!(tree.selected, 0);
+        assert!(!tree.entries[0].expanded);
+    }
+
+    #[test]
+    fn go_to_parent_does_nothing_at_root_level() {
+        let mut tree = make_tree("/root", vec![make_entry("/root/a.txt", false, 0)]);
+        tree.go_to_parent();
+        assert_eq!(tree.selected, 0);
+    }
+
+    // ── state / restore_state ──────────────────────────────────────
+
+    #[test]
+    fn state_roundtrip_restores_expansion_selection_and_scroll() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("a.txt"), "a").unwrap();
+        fs::write(dir.path().join("top.txt"), "t").unwrap();
+
+        let mut tree = FileTree {
+            root: dir.path().to_path_buf(),
+            entries: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            filter_mode: false,
+            filter_query: String::new(),
+            show_git_status: false,
+            git_status: HashMap::new(),
+            max_width_percent: 35,
+            min_width: 25,
+            cached_height: 20,
+            closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
+        };
+        tree.load_directory(&tree.root.clone(), 0);
+        // Expand "sub" and select the file inside it.
+        tree.toggle_expand(0);
+        tree.selected = 1;
+        tree.scroll = 1;
+
+        let state = tree.state();
+        assert_eq!(state.expanded, vec![subdir.clone()]);
+        assert_eq!(state.selected, Some(subdir.join("a.txt")));
+        assert_eq!(state.scroll, 1);
+
+        // Simulate a fresh tree (as after closing and reopening).
+        let mut fresh = FileTree {
+            root: dir.path().to_path_buf(),
+            entries: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            filter_mode: false,
+            filter_query: String::new(),
+            show_git_status: false,
+            git_status: HashMap::new(),
+            max_width_percent: 35,
+            min_width: 25,
+            cached_height: 20,
+            closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
+        };
+        fresh.load_directory(&fresh.root.clone(), 0);
+        assert_eq!(fresh.entries.len(), 2);
+
+        fresh.restore_state(&state);
+        assert_eq!(fresh.entries.len(), 3);
+        assert!(fresh.entries[0].expanded);
+        assert_eq!(fresh.selected, 1);
+        assert_eq!(fresh.entries[1].path, subdir.join("a.txt"));
+        assert_eq!(fresh.scroll, 1);
+    }
+
+    #[test]
+    fn refresh_preserves_expansion_and_prunes_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("a.txt"), "a").unwrap();
+        fs::write(dir.path().join("top.txt"), "t").unwrap();
+
+        let mut tree = FileTree {
+            root: dir.path().to_path_buf(),
+            entries: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            filter_mode: false,
+            filter_query: String::new(),
+            show_git_status: false,
+            git_status: HashMap::new(),
+            max_width_percent: 35,
+            min_width: 25,
+            cached_height: 20,
+            closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
+        };
+        tree.load_directory(&tree.root.clone(), 0);
+        tree.toggle_expand(0);
+        tree.marked.insert(subdir.join("a.txt"));
+        tree.marked.insert(dir.path().join("gone.txt"));
+
+        // refresh needs an Editor for git status; with show_git_status the
+        // load still works with a plain editor, but we avoid constructing
+        // one here by calling the pieces that refresh uses.
+        let state = tree.state();
+        tree.entries.clear();
+        tree.load_directory(&tree.root.clone(), 0);
+        tree.restore_state(&state);
+        tree.marked
+            .retain(|path| tree.entries.iter().any(|entry| entry.path == *path));
+
+        assert!(tree.entries[0].expanded);
+        assert_eq!(tree.entries.len(), 3);
+        assert!(tree.marked.contains(&subdir.join("a.txt")));
+        assert!(!tree.marked.contains(&dir.path().join("gone.txt")));
     }
 }

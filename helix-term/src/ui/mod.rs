@@ -21,7 +21,7 @@ use crate::filter_picker_entry;
 use crate::job::{self, Callback};
 pub use completion::Completion;
 pub use editor::EditorView;
-pub use file_tree::FileTree;
+pub use file_tree::{FileTree, FileTreeState};
 pub use markdown::Markdown;
 pub use menu::Menu;
 pub use picker::{Column as PickerColumn, FileLocation, Picker};

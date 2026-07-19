@@ -3277,12 +3277,22 @@ fn file_tree_toggle(cx: &mut Context) {
     cx.callback.push(Box::new(move |compositor, cx| {
         if let Some(editor_view) = compositor.find::<ui::EditorView>() {
             match editor_view.sidebar.take() {
-                Some(_sidebar) => {
-                    // Sidebar was open, now closed.
+                Some(sidebar) => {
+                    // Sidebar was open, now closed: remember its position.
+                    editor_view.file_tree_state = Some(sidebar.state());
                 }
                 None => {
-                    // Sidebar was not open, open it.
-                    editor_view.sidebar = Some(ui::FileTree::new(root, cx.editor));
+                    // Sidebar was not open, open it, returning to the last
+                    // browsing position when there is one for this root.
+                    let mut tree = ui::FileTree::new(root.clone(), cx.editor);
+                    if let Some(state) = editor_view
+                        .file_tree_state
+                        .as_ref()
+                        .filter(|state| state.root == root)
+                    {
+                        tree.restore_state(state);
+                    }
+                    editor_view.sidebar = Some(tree);
                 }
             }
         }
