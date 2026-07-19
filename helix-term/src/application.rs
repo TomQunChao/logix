@@ -26,8 +26,11 @@ use crate::{
     handlers,
     job::Jobs,
     keymap::Keymaps,
+    session::SessionManager,
     ui::{self, overlay::overlaid},
 };
+#[cfg(not(feature = "integration"))]
+use crate::session::SessionConfig;
 
 use log::{debug, error, info, warn};
 use std::{
@@ -77,6 +80,10 @@ pub struct Application {
     signals: Signals,
     jobs: Jobs,
     lsp_progress: LspProgressMap,
+
+    /// Per-workspace session persistence; `None` when disabled
+    /// (`--no-session`/`HELIX_SESSION=off`) or in integration tests.
+    session: Option<SessionManager>,
 
     theme_mode: Option<theme::Mode>,
 }
@@ -141,6 +148,14 @@ impl Application {
         compositor.push(editor_view);
 
         let jobs = Jobs::new();
+
+        // Sessions stay disabled in integration tests so they never touch
+        // the developer's real session files.
+        #[cfg(not(feature = "integration"))]
+        let session_manager =
+            SessionConfig::resolve(&args).map(|config| SessionManager::new(&config));
+        #[cfg(feature = "integration")]
+        let session_manager: Option<SessionManager> = None;
 
         if args.load_tutor {
             let path = helix_loader::runtime_file(Path::new("tutor"));
@@ -226,7 +241,32 @@ impl Application {
                 editor.new_file(Action::VerticalSplit);
             }
         } else if stdin().is_terminal() || cfg!(feature = "integration") {
-            editor.new_file(Action::VerticalSplit);
+            // No files were given on the command line: restore the previous
+            // session of this workspace, if there is one.
+            let mut restored = false;
+            if let Some(manager) = &session_manager {
+                if let Some(session) = manager.load() {
+                    restored = crate::session::restore(&mut editor, &session);
+                    if restored {
+                        if let Some(sidebar) = session
+                            .sidebar
+                            .as_ref()
+                            .and_then(|state| crate::session::restore_sidebar(state, &editor))
+                        {
+                            if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+                                editor_view.sidebar = Some(sidebar);
+                            }
+                        }
+                        editor.set_status(format!(
+                            "Restored session from {}",
+                            manager.file().display()
+                        ));
+                    }
+                }
+            }
+            if !restored {
+                editor.new_file(Action::VerticalSplit);
+            }
         } else {
             editor
                 .new_file_from_stdin(Action::VerticalSplit)
@@ -253,6 +293,7 @@ impl Application {
             signals,
             jobs,
             lsp_progress: LspProgressMap::new(),
+            session: session_manager,
             theme_mode,
         };
 
@@ -260,6 +301,14 @@ impl Application {
     }
 
     async fn render(&mut self) {
+        if let Some(manager) = &mut self.session {
+            let sidebar = self
+                .compositor
+                .find::<ui::EditorView>()
+                .and_then(|editor_view| editor_view.sidebar.as_ref());
+            manager.save_if_changed(&self.editor, sidebar);
+        }
+
         if self.compositor.full_redraw {
             self.terminal.clear().expect("Cannot clear the terminal");
             self.compositor.full_redraw = false;
@@ -1345,6 +1394,20 @@ impl Application {
         //        want to try to run as much cleanup as we can, regardless of
         //        errors along the way
         let mut errs = Vec::new();
+
+        // Final session write. Skipped when the tree is empty (e.g. after
+        // `:quit` closed the last view): the pre-quit state saved during the
+        // last redraw is kept instead, mirroring how VSCode reopens the
+        // editors that were open when the window was closed.
+        if let Some(manager) = &mut self.session {
+            if !self.editor.tree.is_empty() {
+                let sidebar = self
+                    .compositor
+                    .find::<ui::EditorView>()
+                    .and_then(|editor_view| editor_view.sidebar.as_ref());
+                manager.save(&self.editor, sidebar);
+            }
+        }
 
         if let Err(err) = self
             .jobs

@@ -24,6 +24,21 @@ pub struct Args {
     pub runtime_dir: Option<PathBuf>,
     pub files: IndexMap<PathBuf, Vec<Position>>,
     pub working_directory: Option<PathBuf>,
+    pub session: SessionArg,
+    pub session_dir: Option<PathBuf>,
+}
+
+/// How the session system should behave, as requested on the command line.
+/// Overrides the `HELIX_SESSION` environment variable when specified.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub enum SessionArg {
+    /// Not specified on the command line; fall back to `HELIX_SESSION` or the default.
+    #[default]
+    Unspecified,
+    /// `--session [NAME]`: restore and save the session, optionally using a named session.
+    Enabled(Option<String>),
+    /// `--no-session`: disable session restore and saving.
+    Disabled,
 }
 
 impl Args {
@@ -114,6 +129,20 @@ impl Args {
                 "--log" => match argv.next().as_deref() {
                     Some(path) => args.log_file = Some(path.into()),
                     None => anyhow::bail!("--log must specify a path to write"),
+                },
+                "--session" => {
+                    // The session name is optional: `--session` alone uses the
+                    // default (per-workspace) session, `--session <name>` a named one.
+                    let name = argv.next_if(|opt| !opt.starts_with('-'));
+                    args.session = SessionArg::Enabled(name);
+                }
+                "--no-session" => args.session = SessionArg::Disabled,
+                "--session-dir" => match argv.next().as_deref() {
+                    Some(path) if Path::new(path).exists() && !Path::new(path).is_dir() => {
+                        anyhow::bail!("--session-dir specified is not a directory: {}", path)
+                    }
+                    Some(path) => args.session_dir = Some(path.into()),
+                    None => anyhow::bail!("--session-dir must specify a path to a directory"),
                 },
                 "-w" | "--working-dir" => match argv.next().as_deref() {
                     Some(path) => {
