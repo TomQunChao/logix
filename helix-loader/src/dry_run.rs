@@ -220,3 +220,79 @@ pub fn print_report(searched_dirs: &[(&str, Vec<PathBuf>)]) {
 
     println!("\n=================================================");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dry-run state is global (an AtomicBool plus a shared report), so all
+    /// assertions live in a single test to avoid interference between
+    /// parallel tests. No other test in this crate touches the dry-run
+    /// module, and the `create_dir_all` interception only diverts calls made
+    /// through `dry_run::create_dir_all`, so enabling the global flag here
+    /// cannot affect other tests.
+    #[test]
+    fn dry_run_records_without_creating() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Disabled: behaves like std::fs::create_dir_all.
+        assert!(!is_enabled());
+        let real = tmp.path().join("real/nested/dir");
+        create_dir_all(&real).unwrap();
+        assert!(real.is_dir());
+
+        // Enable: subsequent calls are recorded, not performed.
+        enable();
+        assert!(is_enabled());
+
+        let intercepted = tmp.path().join("would/be/created");
+        create_dir_all(&intercepted).unwrap();
+        assert!(!intercepted.exists());
+
+        // Existing directories are not recorded (nothing would be created).
+        create_dir_all(&real).unwrap();
+        // Duplicate attempts are recorded only once.
+        create_dir_all(&intercepted).unwrap();
+
+        record_read_config(
+            PathBuf::from("/some/config.toml"),
+            ReadOutcome::Loaded,
+        );
+        record_read_config(
+            PathBuf::from("/missing/config.toml"),
+            ReadOutcome::NotFound,
+        );
+        record_action("grammar fetch: rust", "would git fetch");
+        record_synthesized_editor("scrolloff = 7\n".to_owned());
+        record_synthesized_theme("gruvbox".to_owned());
+        record_synthesized_languages(LanguagesSummary {
+            language_count: 2,
+            grammar_count: 1,
+            grammar_selection: None,
+        });
+
+        let report = REPORT.lock().take().unwrap();
+        assert_eq!(report.created_dirs, vec![intercepted.clone()]);
+        assert_eq!(report.read_configs.len(), 2);
+        assert!(matches!(
+            report.read_configs[0].1,
+            ReadOutcome::Loaded
+        ));
+        assert!(matches!(
+            report.read_configs[1].1,
+            ReadOutcome::NotFound
+        ));
+        assert_eq!(
+            report.actions,
+            vec![(
+                "grammar fetch: rust".to_owned(),
+                "would git fetch".to_owned()
+            )]
+        );
+        assert_eq!(report.synthesized_editor.as_deref(), Some("scrolloff = 7\n"));
+        assert_eq!(report.synthesized_theme.as_deref(), Some("gruvbox"));
+        let summary = report.synthesized_languages.unwrap();
+        assert_eq!(summary.language_count, 2);
+        assert_eq!(summary.grammar_count, 1);
+    }
+}
