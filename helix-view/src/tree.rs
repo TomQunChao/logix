@@ -45,7 +45,7 @@ impl Node {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Layout {
     Horizontal,
     Vertical,
@@ -65,6 +65,17 @@ pub struct Container {
     layout: Layout,
     children: Vec<ViewId>,
     area: Rect,
+}
+
+/// A serializable description of the split structure of a [`Tree`].
+///
+/// Leaves carry no data themselves; their position in a depth-first
+/// pre-order walk matches the order of [`Tree::traverse`], so consumers can
+/// zip the leaves with the views yielded by `traverse()`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SplitTree {
+    View,
+    Container { layout: Layout, children: Vec<SplitTree> },
 }
 
 impl Container {
@@ -443,6 +454,31 @@ impl Tree {
 
     pub fn traverse(&self) -> Traverse<'_> {
         Traverse::new(self)
+    }
+
+    /// Returns the split structure of the tree, or `None` if there are no
+    /// views. The leaves of the returned [`SplitTree`] are ordered to match
+    /// [`Tree::traverse`].
+    pub fn splits(&self) -> Option<SplitTree> {
+        fn build(tree: &Tree, id: ViewId) -> SplitTree {
+            match &tree.nodes[id].content {
+                Content::View(_) => SplitTree::View,
+                Content::Container(container) => SplitTree::Container {
+                    layout: container.layout,
+                    children: container
+                        .children
+                        .iter()
+                        .map(|&child| build(tree, child))
+                        .collect(),
+                },
+            }
+        }
+
+        if self.is_empty() {
+            None
+        } else {
+            Some(build(self, self.root))
+        }
     }
 
     // Finds the split in the given direction if it exists

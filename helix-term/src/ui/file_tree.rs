@@ -251,7 +251,7 @@ impl FileTree {
     }
 
     /// Toggle expansion of a directory
-    fn toggle_expand(&mut self, idx: usize) {
+    pub fn toggle_expand(&mut self, idx: usize) {
         if idx >= self.entries.len() {
             return;
         }

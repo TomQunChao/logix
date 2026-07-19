@@ -92,6 +92,12 @@ FLAGS:
     --vsplit                       Split all given files vertically into different windows
     --hsplit                       Split all given files horizontally into different windows
     -w, --working-dir <path>       Specify an initial working directory
+    --session [NAME]               Restore and save a session of the current workspace
+                                   (default: the most recently updated session of the
+                                   project; NAME selects a specific named session)
+    --no-session                   Disable session restore and saving
+    --session-dir <dir>            Directory where session files are stored
+                                   (default: ~/.cache/helix/sessions)
     +[N]                           Open the first given file at line number N, or the last line, if
                                    N is not specified.
 
@@ -101,6 +107,9 @@ ENVIRONMENT VARIABLES:
     HELIX_LANGUAGES_FILE   Language config file (lower priority than --languages)
     HELIX_RUNTIME          Runtime directory (lower priority than --runtime-dir)
     HELIX_LOG_LEVEL        Log level used for integration logging
+    HELIX_SESSION          Session behavior: 'off' disables sessions, any other value
+                           selects a named session (lower priority than --session/--no-session)
+    HELIX_SESSION_DIR      Session storage directory (lower priority than --session-dir)
 ",
             env!("CARGO_PKG_NAME"),
             VERSION_AND_GIT_HASH,

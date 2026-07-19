@@ -112,4 +112,6 @@ hx --dry-run --config-dir ./my-config --grammar build
 | `HELIX_LANGUAGES_FILE` | Language config file (overridden by `--languages`). |
 | `HELIX_RUNTIME` | Runtime directory (overridden by `--runtime-dir`). See [multiple runtime directories](./building-from-source.md#multiple-runtime-directories). |
 | `HELIX_LOG_LEVEL` | Log level used for integration logging. |
+| `HELIX_SESSION` | Session behavior (overridden by `--session`/`--no-session`). Set to `off` to disable sessions, or to a name to select a named session. See [sessions](./sessions.md). |
+| `HELIX_SESSION_DIR` | Session storage directory (overridden by `--session-dir`). See [sessions](./sessions.md). |
 
