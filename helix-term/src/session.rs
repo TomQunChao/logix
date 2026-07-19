@@ -413,19 +413,12 @@ fn layout_state<'a>(
 }
 
 fn sidebar_state(sidebar: &FileTree) -> SidebarState {
+    let state = sidebar.state();
     SidebarState {
-        root: sidebar.root.clone(),
-        expanded: sidebar
-            .entries
-            .iter()
-            .filter(|entry| entry.is_dir && entry.expanded)
-            .map(|entry| entry.path.clone())
-            .collect(),
-        selected: sidebar
-            .entries
-            .get(sidebar.selected)
-            .map(|entry| entry.path.clone()),
-        scroll: sidebar.scroll,
+        root: state.root,
+        expanded: state.expanded,
+        selected: state.selected,
+        scroll: state.scroll,
     }
 }
 
@@ -623,23 +616,11 @@ pub fn restore_sidebar(state: &SidebarState, editor: &Editor) -> Option<FileTree
         return None;
     }
     let mut tree = FileTree::new(state.root.clone(), editor);
-    // Expand parents before their children.
-    let mut expanded = state.expanded.clone();
-    expanded.sort_by_key(|path| path.components().count());
-    for path in expanded {
-        if let Some(idx) = tree
-            .entries
-            .iter()
-            .position(|entry| entry.is_dir && !entry.expanded && entry.path == path)
-        {
-            tree.toggle_expand(idx);
-        }
-    }
-    if let Some(selected) = &state.selected {
-        if let Some(idx) = tree.entries.iter().position(|entry| &entry.path == selected) {
-            tree.selected = idx;
-        }
-    }
-    tree.scroll = state.scroll;
+    tree.restore_state(&crate::ui::FileTreeState {
+        root: state.root.clone(),
+        expanded: state.expanded.clone(),
+        selected: state.selected.clone(),
+        scroll: state.scroll,
+    });
     Some(tree)
 }

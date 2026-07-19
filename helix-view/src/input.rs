@@ -1,7 +1,10 @@
 //! Input event handling, currently backed by termina.
 use anyhow::{anyhow, Error};
 use helix_core::unicode::{segmentation::UnicodeSegmentation, width::UnicodeWidthStr};
-use serde::de::{self, Deserialize, Deserializer};
+use serde::{
+    de::{self, Deserialize, Deserializer},
+    Serialize, Serializer,
+};
 use std::fmt;
 
 pub use crate::keyboard::{KeyCode, KeyModifiers, MediaKeyCode, ModifierKeyCode};
@@ -455,6 +458,15 @@ impl<'de> Deserialize<'de> for KeyEvent {
     {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(de::Error::custom)
+    }
+}
+
+impl Serialize for KeyEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
     }
 }
 

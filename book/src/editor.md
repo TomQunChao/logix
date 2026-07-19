@@ -7,6 +7,7 @@
 - [`[editor.cursor-shape]` Section](#editorcursor-shape-section)
 - [`[editor.file-picker]` Section](#editorfile-picker-section)
 - [`[editor.file-explorer]` Section](#editorfile-explorer-section)
+- [`[editor.file-tree]` Section](#editorfile-tree-section)
 - [`[editor.buffer-picker]` Section](#editorbuffer-picker-section)
 - [`[editor.auto-pairs]` Section](#editorauto-pairs-section)
 - [`[editor.auto-save]` Section](#editorauto-save-section)
@@ -250,6 +251,52 @@ Note that the ignore files consulted by the file explorer when `ignore` is set t
 |`git-global` | Enables reading global `.gitignore`, whose path is specified in git's config: `core.excludesfile` option | `false`
 |`git-exclude` | Enables reading `.git/info/exclude` files | `false`
 |`flatten-dirs` | Enables flattening single child directories | `true`
+
+### `[editor.file-tree]` Section
+
+Configures the file tree sidebar (toggled with `Space e`). The sidebar
+remembers its last browsing position (expanded folders, selection and
+scroll) whenever it is closed and returns to it when reopened.
+
+| Key | Description | Default |
+|--|--|---------|
+|`open-behavior` | When the tree closes after a file is opened from it: `auto` closes it automatically, `manual` keeps it open until it is closed explicitly | `"auto"`
+|`keys` | Key bindings used inside the file tree (see below) | see below
+
+The `keys` table maps actions to keys in the same format as keymap
+definitions:
+
+| Key | Description | Default |
+|--|--|---------|
+|`quit` | Close the file tree | `q`
+|`open` | Open the selected file or directory | `ret`
+|`expand` | Expand the selected directory (or open the selected file) | `l`
+|`collapse` | Collapse the selected directory | `h`
+|`refresh` | Re-read the tree from disk | `S-r`
+|`filter` | Enter filter mode | `/`
+|`select` | Toggle selection of the current file/directory | `v`
+|`select-extend` | Select the range from the last selected entry to the current one | `S-v`
+|`delete` | Delete the selected files/directories (asks for confirmation) | `d`
+|`create-file` | Create a new file inside the selected directory | `a`
+|`create-dir` | Create a new directory inside the selected directory | `S-a`
+|`parent` | Collapse the current directory and move to its parent | `p`
+|`goto-top` | Move selection to the first entry | `g`
+|`goto-bottom` | Move selection to the last entry | `S-g`
+|`move-up` | Move selection up | `k`
+|`move-down` | Move selection down | `j`
+
+`Esc` clears the current selection first and closes the tree on a second
+press; `Esc`/`C-c`, the arrow keys and `Enter` always work in addition to
+the configured bindings. Example:
+
+```toml
+[editor.file-tree]
+open-behavior = "manual"
+
+[editor.file-tree.keys]
+delete = "x"
+create-file = "n"
+```
 
 ### `[editor.buffer-picker]` Section
 

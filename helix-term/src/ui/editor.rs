@@ -7,7 +7,7 @@ use crate::{
     keymap::{KeymapResult, Keymaps},
     ui::{
         document::{render_document, LinePos, TextRenderer},
-        file_tree::FileTree,
+        file_tree::{FileTree, FileTreeState},
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
         Completion, ProgressSpinners,
@@ -47,6 +47,9 @@ pub struct EditorView {
     terminal_focused: bool,
     /// Optional file tree sidebar rendered as a left pane.
     pub sidebar: Option<FileTree>,
+    /// Last browsing position of the file tree sidebar, remembered whenever
+    /// it is closed so reopening it returns to the same place.
+    pub file_tree_state: Option<FileTreeState>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,11 +74,20 @@ impl EditorView {
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
             sidebar: None,
+            file_tree_state: None,
         }
     }
 
     pub fn spinners_mut(&mut self) -> &mut ProgressSpinners {
         &mut self.spinners
+    }
+
+    /// Closes the file tree sidebar, remembering its browsing position so
+    /// that the next open returns to the same place.
+    pub fn close_sidebar(&mut self) {
+        if let Some(sidebar) = self.sidebar.take() {
+            self.file_tree_state = Some(sidebar.state());
+        }
     }
 
     pub fn render_view(
@@ -1457,17 +1469,20 @@ impl Component for EditorView {
         context: &mut crate::compositor::Context,
     ) -> EventResult {
         // Route events to the file tree sidebar first if it's active.
-        if let Some(ref mut sidebar) = self.sidebar.as_mut() {
-            match sidebar.handle_event(event, context) {
+        if self.sidebar.is_some() {
+            let sidebar = self.sidebar.as_mut().unwrap();
+            let result = sidebar.handle_event(event, context);
+            let closed = sidebar.closed;
+            match result {
                 EventResult::Consumed(callback) => {
-                    if sidebar.closed {
-                        self.sidebar = None;
+                    if closed {
+                        self.close_sidebar();
                     }
                     return EventResult::Consumed(callback);
                 }
                 EventResult::Ignored(_) => {
-                    if sidebar.closed {
-                        self.sidebar = None;
+                    if closed {
+                        self.close_sidebar();
                     }
                 }
             }

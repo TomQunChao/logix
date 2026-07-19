@@ -266,6 +266,16 @@ impl Application {
             }
             if !restored {
                 editor.new_file(Action::VerticalSplit);
+                // Without a previous session, open the file tree by default.
+                #[cfg(not(feature = "integration"))]
+                {
+                    let root = helix_loader::find_workspace().0;
+                    if root.is_dir() {
+                        if let Some(editor_view) = compositor.find::<ui::EditorView>() {
+                            editor_view.sidebar = Some(ui::FileTree::new(root, &editor));
+                        }
+                    }
+                }
             }
         } else {
             editor
@@ -1327,6 +1337,12 @@ impl Application {
             .show_cursor(CursorKind::Block)
             .ok();
         self.terminal.restore()
+    }
+
+    /// Read-only access to the compositor, for integration tests.
+    #[cfg(feature = "integration")]
+    pub fn compositor(&self) -> &Compositor {
+        &self.compositor
     }
 
     #[cfg(all(not(feature = "integration"), not(windows)))]
