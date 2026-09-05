@@ -528,6 +528,9 @@ pub struct Config {
     pub buffer_picker: BufferPickerConfig,
     /// Workspace-trust configuration.
     pub workspace_trust: WorkspaceTrustConfig,
+    /// Separator used when composing the terminal tab title. The full title is
+    /// `"logix{sep}{project}{sep}{file}"`. Defaults to `" - "`.
+    pub terminal_title_separator: String,
 }
 
 /// User-facing configuration for `[editor.workspace-trust]`.
@@ -1335,6 +1338,7 @@ impl Default for Config {
             kitty_keyboard_protocol: Default::default(),
             buffer_picker: BufferPickerConfig::default(),
             workspace_trust: WorkspaceTrustConfig::default(),
+            terminal_title_separator: " - ".to_string(),
         }
     }
 }
