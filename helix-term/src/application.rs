@@ -356,6 +356,7 @@ impl Application {
         S: Stream<Item = std::io::Result<TerminalEvent>> + Unpin,
     {
         self.render().await;
+        handlers::terminal_title::update(&self.editor);
 
         loop {
             if !self.event_loop_until_idle(input_stream).await {

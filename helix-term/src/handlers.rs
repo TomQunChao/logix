@@ -25,6 +25,7 @@ mod document_links;
 mod prompt;
 mod signature_help;
 mod snippet;
+pub mod terminal_title;
 mod workspace_trust;
 
 pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
@@ -64,5 +65,6 @@ pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
     document_links::register_hooks(&handlers);
     prompt::register_hooks(&handlers);
     workspace_trust::register_hooks(&handlers);
+    terminal_title::register_hooks(&handlers);
     handlers
 }
