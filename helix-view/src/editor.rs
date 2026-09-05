@@ -316,6 +316,8 @@ pub struct FileTreeKeys {
     pub move_up: KeyEvent,
     /// Move selection down. Defaults to `j`.
     pub move_down: KeyEvent,
+    /// Rename the selected file/directory. Defaults to `r`.
+    pub rename: KeyEvent,
 }
 
 impl Default for FileTreeKeys {
@@ -343,6 +345,7 @@ impl Default for FileTreeKeys {
             goto_bottom: key(KeyCode::Char('G')),
             move_up: key(KeyCode::Char('k')),
             move_down: key(KeyCode::Char('j')),
+            rename: key(KeyCode::Char('r')),
         }
     }
 }
