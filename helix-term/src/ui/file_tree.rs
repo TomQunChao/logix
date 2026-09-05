@@ -701,6 +701,76 @@ impl FileTree {
         })))
     }
 
+    /// Opens a prompt pre-filled with the name of the selected entry so it
+    /// can be renamed. The tree is refreshed afterwards and the renamed
+    /// entry is revealed.
+    fn rename_prompt(&mut self, cx: &mut Context) -> EventResult {
+        if self.selected >= self.entries.len() {
+            return EventResult::Consumed(None);
+        }
+        let entry = &self.entries[self.selected];
+        let old_path = entry.path.clone();
+        let old_name = entry.name.clone();
+        let root = self.root.clone();
+
+        let title: std::borrow::Cow<'static, str> = if entry.is_dir {
+            "Rename directory to: ".into()
+        } else {
+            "Rename file to: ".into()
+        };
+
+        let name_to_compare = old_name.clone();
+        let prompt = Prompt::new(
+            title,
+            None,
+            super::completers::none,
+            move |cx, input, event| {
+                if event != PromptEvent::Validate {
+                    return;
+                }
+                let new_name = input.trim();
+                if new_name.is_empty() || new_name == name_to_compare {
+                    return;
+                }
+                let parent = old_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| root.clone());
+                let new_path = parent.join(new_name);
+
+                match fs::rename(&old_path, &new_path) {
+                    Ok(()) => {
+                        cx.editor
+                            .set_status(format!("Renamed to {}", new_path.display()));
+                        let renamed = new_path;
+                        crate::job::dispatch_blocking(move |editor, compositor| {
+                            let Some(editor_view) =
+                                compositor.find::<super::EditorView>()
+                            else {
+                                return;
+                            };
+                            if let Some(tree) = editor_view.sidebar.as_mut() {
+                                tree.refresh(editor);
+                                tree.reveal(&renamed);
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        cx.editor.set_error(format!(
+                            "Failed to rename {}: {err}",
+                            old_path.display()
+                        ));
+                    }
+                }
+            },
+        )
+        .with_line(old_name, cx.editor);
+
+        EventResult::Consumed(Some(Box::new(move |compositor, _cx| {
+            compositor.push(Box::new(prompt));
+        })))
+    }
+
     /// Render a single entry
     fn render_entry(
         &self,
@@ -833,7 +903,7 @@ impl Component for FileTree {
         // Show help hint at bottom if space allows
         if area.height > 3 && !self.filter_mode {
             let help_style = cx.editor.theme.get("ui.text");
-            let help = "Enter:open v:sel d:del a:new A:dir p:up q:quit";
+            let help = "Enter:open v:sel d:del a:new A:dir r:rename p:up q:quit";
             if help.len() < area.width as usize {
                 surface.set_string(area.x + 1, area.y + area.height - 1, help, help_style);
             }
@@ -941,6 +1011,8 @@ impl Component for FileTree {
             return self.create_prompt(false, cx);
         } else if key == keys.create_dir {
             return self.create_prompt(true, cx);
+        } else if key == keys.rename {
+            return self.rename_prompt(cx);
         } else if key == keys.refresh {
             self.refresh(cx.editor);
         } else if key == keys.filter {
