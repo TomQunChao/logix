@@ -532,8 +532,12 @@ pub struct Config {
     /// Workspace-trust configuration.
     pub workspace_trust: WorkspaceTrustConfig,
     /// Separator used when composing the terminal tab title. The full title is
-    /// `"logix{sep}{project}{sep}{file}"`. Defaults to `" - "`.
+    /// `"lx{sep}{name}"`, where `name` is the current file's name, or the workspace's name
+    /// when the buffer has no file. Defaults to `" - "`.
     pub terminal_title_separator: String,
+    /// Maximum number of characters in the terminal tab title. Longer titles are truncated
+    /// with an ellipsis (`…`). When unset, the title is truncated to the terminal width.
+    pub terminal_title_max_width: Option<usize>,
 }
 
 /// User-facing configuration for `[editor.workspace-trust]`.
@@ -1342,6 +1346,7 @@ impl Default for Config {
             buffer_picker: BufferPickerConfig::default(),
             workspace_trust: WorkspaceTrustConfig::default(),
             terminal_title_separator: " - ".to_string(),
+            terminal_title_max_width: None,
         }
     }
 }
