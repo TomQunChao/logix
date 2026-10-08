@@ -2,7 +2,7 @@ use crate::compositor::{Callback, Component, Compositor, Context, Event, EventRe
 use helix_core::unicode::width::UnicodeWidthStr;
 use helix_view::{
     editor::{Action, FileTreeOpenBehavior},
-    graphics::{CursorKind, Rect},
+    graphics::{CursorKind, Rect, Style},
     input::KeyEvent,
     keyboard::{KeyCode, KeyModifiers},
     Editor,
@@ -45,6 +45,112 @@ impl GitStatus {
             Self::Conflict => "C",
         }
     }
+}
+
+/// Nerd Font glyphs used to distinguish file types in the tree. Rendering these requires a
+/// terminal font patched with Nerd Fonts, otherwise they appear as replacement boxes.
+mod glyph {
+    pub const FILE: &str = "\u{f15b}";
+    pub const RUST: &str = "\u{e7a8}";
+    pub const PYTHON: &str = "\u{e73c}";
+    pub const JAVASCRIPT: &str = "\u{e74e}";
+    pub const TYPESCRIPT: &str = "\u{e628}";
+    pub const GO: &str = "\u{e627}";
+    pub const C: &str = "\u{e61e}";
+    pub const CPP: &str = "\u{e61d}";
+    pub const JAVA: &str = "\u{e738}";
+    pub const RUBY: &str = "\u{e739}";
+    pub const PHP: &str = "\u{e73d}";
+    pub const HTML: &str = "\u{e736}";
+    pub const CSS: &str = "\u{e749}";
+    pub const SASS: &str = "\u{e603}";
+    pub const JSON: &str = "\u{e60b}";
+    pub const YAML: &str = "\u{e615}";
+    pub const TOML: &str = "\u{e6b2}";
+    pub const MARKDOWN: &str = "\u{e73e}";
+    pub const SHELL: &str = "\u{f489}";
+    pub const LUA: &str = "\u{e620}";
+    pub const VIM: &str = "\u{e62b}";
+    pub const GIT: &str = "\u{e702}";
+    pub const DOCKER: &str = "\u{f308}";
+    pub const NIX: &str = "\u{f313}";
+    pub const MAKE: &str = "\u{e673}";
+    pub const LICENSE: &str = "\u{e60a}";
+    pub const IMAGE: &str = "\u{f1c5}";
+    pub const PDF: &str = "\u{f1c1}";
+    pub const AUDIO: &str = "\u{f1c7}";
+    pub const VIDEO: &str = "\u{f1c8}";
+    pub const ARCHIVE: &str = "\u{f1c6}";
+    pub const LOCK: &str = "\u{f023}";
+}
+
+/// The Nerd Font glyph representing a file, chosen by its exact name (e.g. `Makefile`) or,
+/// failing that, its extension. Unknown files fall back to a generic file glyph.
+fn file_icon(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+
+    match lower.as_str() {
+        "cargo.toml" | "cargo.lock" => return glyph::RUST,
+        "makefile" | "gnumakefile" | "cmakelists.txt" => return glyph::MAKE,
+        "dockerfile" | "containerfile" => return glyph::DOCKER,
+        "license" | "licence" | "copying" | "notice" => return glyph::LICENSE,
+        ".gitignore" | ".gitattributes" | ".gitmodules" | ".gitconfig" => return glyph::GIT,
+        "flake.lock" => return glyph::NIX,
+        _ => {}
+    }
+
+    // A leading dot (dotfiles) is not an extension separator.
+    let ext = match lower.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext,
+        _ => return glyph::FILE,
+    };
+
+    match ext {
+        "rs" => glyph::RUST,
+        "py" | "pyi" | "pyw" => glyph::PYTHON,
+        "js" | "mjs" | "cjs" | "jsx" => glyph::JAVASCRIPT,
+        "ts" | "tsx" | "mts" | "cts" => glyph::TYPESCRIPT,
+        "go" => glyph::GO,
+        "c" | "h" => glyph::C,
+        "cc" | "cpp" | "cxx" | "c++" | "hh" | "hpp" | "hxx" | "h++" => glyph::CPP,
+        "java" => glyph::JAVA,
+        "rb" | "erb" => glyph::RUBY,
+        "php" => glyph::PHP,
+        "html" | "htm" => glyph::HTML,
+        "css" => glyph::CSS,
+        "sass" | "scss" | "less" => glyph::SASS,
+        "json" | "jsonc" => glyph::JSON,
+        "yaml" | "yml" => glyph::YAML,
+        "toml" => glyph::TOML,
+        "md" | "markdown" | "mdx" => glyph::MARKDOWN,
+        "sh" | "bash" | "zsh" | "fish" | "ksh" => glyph::SHELL,
+        "lua" => glyph::LUA,
+        "vim" => glyph::VIM,
+        "nix" => glyph::NIX,
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "svg" => glyph::IMAGE,
+        "pdf" => glyph::PDF,
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" => glyph::AUDIO,
+        "mp4" | "mkv" | "mov" | "webm" | "avi" => glyph::VIDEO,
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "zst" | "7z" | "rar" => glyph::ARCHIVE,
+        "lock" => glyph::LOCK,
+        _ => glyph::FILE,
+    }
+}
+
+/// Theme key used to color an entry by its git status. Reusing Helix's diff keys keeps the
+/// colors in sync with the active theme instead of hard-coding them.
+fn git_status_theme_key(status: GitStatus) -> &'static str {
+    match status {
+        GitStatus::Untracked | GitStatus::Added => "diff.plus",
+        GitStatus::Modified => "diff.delta",
+        GitStatus::Renamed => "diff.delta.moved",
+        GitStatus::Deleted => "diff.minus",
+        GitStatus::Conflict => "error",
+    }
+}
+
+fn git_status_style(theme: &helix_view::Theme, status: GitStatus) -> Style {
+    theme.get(git_status_theme_key(status))
 }
 
 /// A single entry in the file tree
@@ -308,7 +414,7 @@ impl FileTree {
             .map(|e| {
                 // indentation + icon + name + git status + padding
                 let indent = e.depth * 2;
-                let icon = if e.is_dir { 2 } else { 1 }; // "▸ " or "  "
+                let icon = 2; // "▸ "/"▾ " for directories, "<glyph> " for files
                 let mark = if self.marked.contains(&e.path) { 2 } else { 0 }; // "● "
                 let name = e.name.width();
                 let git = if e.git_status.is_some() { 2 } else { 0 };
@@ -798,19 +904,29 @@ impl FileTree {
             spans.push(Span::raw(indent));
         }
 
-        // Icon
-        let icon = if entry.is_dir {
-            if entry.expanded {
-                "▾ "
-            } else {
-                "▸ "
-            }
-        } else {
-            "  "
-        };
         let dir_style = theme.get("ui.text.directory");
         let text_style = theme.get("ui.text");
-        let icon_style = if entry.is_dir { dir_style } else { text_style };
+        // Color files by their git status; the styles come from the active theme.
+        let status_style = entry
+            .git_status
+            .map(|status| git_status_style(theme, status));
+
+        // Icon: directories show a disclosure marker, files a Nerd Font glyph for their
+        // type. Both occupy two columns so the names stay aligned.
+        let icon = if entry.is_dir {
+            if entry.expanded {
+                "▾ ".to_string()
+            } else {
+                "▸ ".to_string()
+            }
+        } else {
+            format!("{} ", file_icon(&entry.name))
+        };
+        let icon_style = if entry.is_dir {
+            dir_style
+        } else {
+            status_style.unwrap_or(text_style)
+        };
         spans.push(Span::styled(icon, icon_style));
 
         // Selection mark
@@ -819,7 +935,11 @@ impl FileTree {
         }
 
         // Name
-        let name_style = if entry.is_dir { dir_style } else { text_style };
+        let name_style = if entry.is_dir {
+            dir_style
+        } else {
+            status_style.unwrap_or(text_style)
+        };
         if self.marked.contains(&entry.path) {
             spans.push(Span::styled(&entry.name, theme.get("ui.text.focus")));
         } else {
@@ -828,15 +948,10 @@ impl FileTree {
 
         // Git status
         if let Some(status) = entry.git_status {
-            let git_style = match status {
-                GitStatus::Untracked => theme.get("diff.plus"),
-                GitStatus::Modified => theme.get("diff.delta"),
-                GitStatus::Added => theme.get("diff.plus"),
-                GitStatus::Deleted => theme.get("diff.minus"),
-                GitStatus::Renamed => theme.get("diff.delta.moved"),
-                GitStatus::Conflict => theme.get("error"),
-            };
-            spans.push(Span::styled(format!(" {}", status.label()), git_style));
+            spans.push(Span::styled(
+                format!(" {}", status.label()),
+                git_status_style(theme, status),
+            ));
         }
 
         let line = Spans::from(spans);
@@ -1219,11 +1334,11 @@ mod tests {
         let tree = make_tree(
             "/root",
             vec![
-                make_entry("/root/a.rs", false, 0), // name "a.rs" = 4 chars → 1 + 4 + 2 = 7
-                make_entry("/root/very_long_name.txt", false, 0), // name "very_long_name.txt" = 19 → 1 + 19 + 2 = 22
+                make_entry("/root/a.rs", false, 0), // name "a.rs" = 4 → 2 + 4 + 2 = 8
+                make_entry("/root/very_long_name.txt", false, 0), // name "very_long_name.txt" = 19 → 2 + 19 + 2 = 23
             ],
         );
-        // Longest: 22, clamped to [25, 70] → 25
+        // Longest: 23, clamped to [25, 70] → 25
         let w = tree.compute_width(200);
         assert_eq!(w, 25);
     }
@@ -1234,11 +1349,11 @@ mod tests {
             "/root",
             vec![
                 make_entry("/root/dir", true, 0), // depth 0, dir: 0*2 + 2 + 3 + 2 = 7
-                make_entry("/root/dir/nested_file.rs", false, 2), // depth 2: 2*2 + 1 + 14 + 2 = 21
-                make_entry("/root/readme.md", false, 0), // depth 0, file: 0 + 1 + 10 + 2 = 13
+                make_entry("/root/dir/nested_file.rs", false, 2), // depth 2: 2*2 + 2 + 14 + 2 = 22
+                make_entry("/root/readme.md", false, 0), // depth 0, file: 0 + 2 + 10 + 2 = 14
             ],
         );
-        // Max = 21, clamped to [25, 70] → 25
+        // Max = 22, clamped to [25, 70] → 25
         let w = tree.compute_width(200);
         assert_eq!(w, 25);
     }
@@ -1246,7 +1361,7 @@ mod tests {
     #[test]
     fn compute_width_respects_max_width_percent() {
         let tree = make_tree("/root", vec![make_entry("/root/x", false, 0)]);
-        // name "x" = 1 → 1 + 1 + 2 = 4, max_allowed = 100*35% = 35, clamp(4, 25, max(25,35)) → 25
+        // name "x" = 1 → 2 + 1 + 2 = 5, max_allowed = 100*35% = 35, clamp(5, 25, max(25,35)) → 25
         let w = tree.compute_width(100);
         assert!((25..=35).contains(&w));
     }
@@ -1262,9 +1377,63 @@ mod tests {
             }],
         );
         tree.show_git_status = true;
-        // name "modified.rs" = 11 → 1 + 11 + 2 (git) + 2 = 16, clamped → 25
+        // name "modified.rs" = 11 → 2 + 11 + 2 (git) + 2 = 17, clamped → 25
         let w = tree.compute_width(200);
         assert_eq!(w, 25);
+    }
+
+    // ── file icons ──────────────────────────────────────────────────
+
+    #[test]
+    fn known_extensions_map_to_their_glyph() {
+        assert_eq!(file_icon("main.rs"), glyph::RUST);
+        assert_eq!(file_icon("script.py"), glyph::PYTHON);
+        assert_eq!(file_icon("app.ts"), glyph::TYPESCRIPT);
+        assert_eq!(file_icon("index.html"), glyph::HTML);
+        assert_eq!(file_icon("styles.scss"), glyph::SASS);
+        assert_eq!(file_icon("logo.svg"), glyph::IMAGE);
+    }
+
+    #[test]
+    fn special_filenames_are_recognized() {
+        assert_eq!(file_icon("Cargo.toml"), glyph::RUST);
+        assert_eq!(file_icon("Cargo.lock"), glyph::RUST);
+        assert_eq!(file_icon("Makefile"), glyph::MAKE);
+        assert_eq!(file_icon("Dockerfile"), glyph::DOCKER);
+        assert_eq!(file_icon("LICENSE"), glyph::LICENSE);
+        assert_eq!(file_icon(".gitignore"), glyph::GIT);
+        assert_eq!(file_icon("flake.lock"), glyph::NIX);
+    }
+
+    #[test]
+    fn icon_lookup_is_case_insensitive() {
+        assert_eq!(file_icon("MAIN.RS"), glyph::RUST);
+        assert_eq!(file_icon("ReadMe.MD"), glyph::MARKDOWN);
+    }
+
+    #[test]
+    fn unknown_and_extensionless_files_use_the_default_glyph() {
+        assert_eq!(file_icon("mystery.xyz"), glyph::FILE);
+        assert_eq!(file_icon("README"), glyph::FILE);
+        assert_eq!(file_icon(".bashrc"), glyph::FILE);
+    }
+
+    #[test]
+    fn only_the_last_extension_counts() {
+        assert_eq!(file_icon("archive.tar.gz"), glyph::ARCHIVE);
+        assert_eq!(file_icon("types.d.ts"), glyph::TYPESCRIPT);
+    }
+
+    // ── git status colors ───────────────────────────────────────────
+
+    #[test]
+    fn git_statuses_map_to_theme_keys() {
+        assert_eq!(git_status_theme_key(GitStatus::Untracked), "diff.plus");
+        assert_eq!(git_status_theme_key(GitStatus::Added), "diff.plus");
+        assert_eq!(git_status_theme_key(GitStatus::Modified), "diff.delta");
+        assert_eq!(git_status_theme_key(GitStatus::Renamed), "diff.delta.moved");
+        assert_eq!(git_status_theme_key(GitStatus::Deleted), "diff.minus");
+        assert_eq!(git_status_theme_key(GitStatus::Conflict), "error");
     }
 
     // ── navigation ──────────────────────────────────────────────────
