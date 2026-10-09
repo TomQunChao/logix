@@ -16,9 +16,12 @@ const ELLIPSIS: char = '…';
 fn build_title(editor: &Editor, config: &Config) -> String {
     let sep = &config.terminal_title_separator;
 
-    let doc_id = editor.tree.get(editor.tree.focus).doc;
+    // The focused view may not be resolvable yet (e.g. while a document is being opened).
+    let Some(view) = editor.tree.try_get(editor.tree.focus) else {
+        return APP_NAME.to_string();
+    };
 
-    let doc = match editor.documents.get(&doc_id) {
+    let doc = match editor.documents.get(&view.doc) {
         Some(doc) => doc,
         None => return APP_NAME.to_string(),
     };
