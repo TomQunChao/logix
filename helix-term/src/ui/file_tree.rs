@@ -158,6 +158,107 @@ fn git_status_style(theme: &helix_view::Theme, status: GitStatus) -> Style {
     theme.get(git_status_theme_key(status))
 }
 
+/// Whether `path`'s file name starts with a dot (a hidden file).
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+}
+
+/// Put `paths` on the system clipboard as files, so they can be pasted in a file manager.
+///
+/// This is inherently platform-specific and best-effort: it shells out to the platform's
+/// clipboard tool (`wl-copy`/`xclip`, `osascript`, or PowerShell).
+#[cfg(target_os = "linux")]
+fn copy_paths_to_system_clipboard(paths: &[PathBuf]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let uris: String = paths
+        .iter()
+        .map(|path| format!("file://{}\r\n", path.display()))
+        .collect();
+
+    let run = |cmd: &str, args: &[&str]| -> std::io::Result<()> {
+        let mut child = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("stdin was piped")
+            .write_all(uris.as_bytes())?;
+        let status = child.wait()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!("{cmd} exited with {status}")))
+        }
+    };
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && run("wl-copy", &["--type", "text/uri-list"]).is_ok()
+    {
+        return Ok(());
+    }
+    run(
+        "xclip",
+        &["-selection", "clipboard", "-t", "text/uri-list", "-i"],
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn copy_paths_to_system_clipboard(paths: &[PathBuf]) -> std::io::Result<()> {
+    use std::process::Command;
+
+    let mut script = String::from("set the clipboard to {");
+    for (i, path) in paths.iter().enumerate() {
+        if i > 0 {
+            script.push_str(", ");
+        }
+        script.push_str(&format!("POSIX file \"{}\"", path.display()));
+    }
+    script.push('}');
+
+    let status = Command::new("osascript").arg("-e").arg(&script).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "osascript exited with {status}"
+        )))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn copy_paths_to_system_clipboard(paths: &[PathBuf]) -> std::io::Result<()> {
+    use std::process::Command;
+
+    let list = paths
+        .iter()
+        .map(|path| format!("'{}'", path.display()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let status = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!("Set-Clipboard -LiteralPath {list}"),
+        ])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "powershell exited with {status}"
+        )))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn copy_paths_to_system_clipboard(_paths: &[PathBuf]) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "copying files to the system clipboard is not supported on this platform",
+    ))
+}
+
 /// A single entry in the file tree
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -220,6 +321,10 @@ pub struct FileTree {
     pub show_git_status: bool,
     /// Cached git status for files
     pub git_status: HashMap<PathBuf, GitStatus>,
+    /// Whether hidden (dot) files are listed. Toggled with `toggle_hidden`.
+    pub show_hidden: bool,
+    /// Whether VCS-ignored files are listed. Toggled together with `show_hidden`.
+    pub show_ignored: bool,
     /// Maximum width as percentage of total width
     pub max_width_percent: u8,
     /// Minimum width in columns
@@ -245,6 +350,8 @@ impl FileTree {
             filter_query: String::new(),
             show_git_status: true,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
@@ -332,11 +439,17 @@ impl FileTree {
 
         for entry in entries.flatten() {
             let path = entry.path();
+            if !self.show_hidden && is_hidden(&path) {
+                continue;
+            }
             let is_dir = path.is_dir();
             let mut file_entry = FileEntry::new(path, is_dir, depth);
 
             // Apply git status if available (children of an ignored directory inherit it)
             file_entry.git_status = self.git_status_for(&file_entry.path);
+            if !self.show_ignored && file_entry.git_status == Some(GitStatus::Ignored) {
+                continue;
+            }
 
             if is_dir {
                 dirs.push(file_entry);
@@ -503,9 +616,15 @@ impl FileTree {
 
         for entry in entries.flatten() {
             let path = entry.path();
+            if !self.show_hidden && is_hidden(&path) {
+                continue;
+            }
             let is_dir = path.is_dir();
             let mut file_entry = FileEntry::new(path, is_dir, depth);
             file_entry.git_status = self.git_status_for(&file_entry.path);
+            if !self.show_ignored && file_entry.git_status == Some(GitStatus::Ignored) {
+                continue;
+            }
 
             if is_dir {
                 dirs.push(file_entry);
@@ -542,6 +661,132 @@ impl FileTree {
             }
             true
         }
+    }
+
+    /// Open the selected file in a vertical split (directories are expanded instead).
+    fn open_split(&mut self, cx: &mut Context) {
+        if self.selected >= self.entries.len() {
+            return;
+        }
+        if self.entries[self.selected].is_dir {
+            self.toggle_expand(self.selected);
+            return;
+        }
+        let path = self.entries[self.selected].path.clone();
+        if let Err(e) = cx.editor.open(&path, Action::VerticalSplit) {
+            cx.editor.set_error(format!("Failed to open file: {e:?}"));
+        }
+    }
+
+    /// Copy the selected entry's path to the clipboard, absolute or relative to the root.
+    fn copy_path(&self, absolute: bool, cx: &mut Context) {
+        let Some(entry) = self.entries.get(self.selected) else {
+            return;
+        };
+        let path = if absolute {
+            entry.path.clone()
+        } else {
+            entry
+                .path
+                .strip_prefix(&self.root)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| entry.path.clone())
+        };
+        match cx
+            .editor
+            .registers
+            .write('+', vec![path.display().to_string()])
+        {
+            Ok(()) => cx.editor.set_status(format!("Copied {}", path.display())),
+            Err(err) => cx.editor.set_error(format!("Clipboard error: {err}")),
+        }
+    }
+
+    /// Copy the contents of the selected file to the clipboard.
+    fn copy_file_contents(&self, cx: &mut Context) {
+        let Some(entry) = self
+            .entries
+            .get(self.selected)
+            .filter(|entry| !entry.is_dir)
+        else {
+            return;
+        };
+        match fs::read_to_string(&entry.path) {
+            Ok(contents) => match cx.editor.registers.write('+', vec![contents]) {
+                Ok(()) => cx
+                    .editor
+                    .set_status(format!("Copied contents of {}", entry.name)),
+                Err(err) => cx.editor.set_error(format!("Clipboard error: {err}")),
+            },
+            Err(err) => cx
+                .editor
+                .set_error(format!("Failed to read {}: {err}", entry.name)),
+        }
+    }
+
+    /// Copy the selected file itself to the system clipboard, so it can be pasted in a file
+    /// manager.
+    fn copy_file_to_clipboard(&self, cx: &mut Context) {
+        let Some(entry) = self.entries.get(self.selected) else {
+            return;
+        };
+        match copy_paths_to_system_clipboard(std::slice::from_ref(&entry.path)) {
+            Ok(()) => cx.editor.set_status(format!("Copied file {}", entry.name)),
+            Err(err) => cx.editor.set_error(format!("Failed to copy file: {err}")),
+        }
+    }
+
+    /// Collapse every expanded directory.
+    fn collapse_all(&mut self) {
+        for idx in (0..self.entries.len()).rev() {
+            if self.entries[idx].is_dir && self.entries[idx].expanded {
+                self.toggle_expand(idx);
+            }
+        }
+        if self.selected >= self.entries.len() {
+            self.selected = self.entries.len().saturating_sub(1);
+        }
+        self.update_scroll();
+    }
+
+    /// Toggle collapsing of the current directory, or of the directory holding the current file.
+    fn toggle_collapse_current(&mut self) {
+        let idx = match self.entries.get(self.selected) {
+            Some(entry) if entry.is_dir => self.selected,
+            Some(entry) => {
+                let Some(parent) = entry.path.parent().map(Path::to_path_buf) else {
+                    return;
+                };
+                match self
+                    .entries
+                    .iter()
+                    .position(|e| e.is_dir && e.path == parent)
+                {
+                    Some(idx) => idx,
+                    None => return,
+                }
+            }
+            None => return,
+        };
+        self.toggle_expand(idx);
+    }
+
+    /// Toggle whether hidden (dot) files and VCS-ignored files are listed.
+    fn toggle_hidden(&mut self) {
+        let show = !(self.show_hidden && self.show_ignored);
+        self.show_hidden = show;
+        self.show_ignored = show;
+
+        // Re-list the tree so the filter takes effect, restoring the browsing position.
+        let state = self.state();
+        self.entries.clear();
+        self.selected = 0;
+        self.load_directory(&self.root.clone(), 0);
+        self.restore_state(&state);
+        if self.selected >= self.entries.len() {
+            self.selected = self.entries.len().saturating_sub(1);
+        }
+        self.update_scroll();
     }
 
     /// Move selection up
@@ -1132,7 +1377,9 @@ impl Component for FileTree {
             return EventResult::Consumed(None);
         }
 
-        if key == keys.quit {
+        if key == keys.split_open {
+            self.open_split(cx);
+        } else if key == keys.quit {
             self.closed = true;
         } else if key == keys.move_down || key.code == KeyCode::Down {
             self.move_down();
@@ -1148,7 +1395,11 @@ impl Component for FileTree {
             if self.open_selected(cx) && open_behavior == FileTreeOpenBehavior::Auto {
                 self.closed = true;
             }
-        } else if key == keys.collapse || key.code == KeyCode::Left {
+        } else if key == keys.collapse {
+            // Toggle collapsing of the current directory, or of the directory holding the
+            // current file.
+            self.toggle_collapse_current();
+        } else if key.code == KeyCode::Left {
             // Collapse current directory if it is expanded.
             if self.selected < self.entries.len() && self.entries[self.selected].expanded {
                 self.toggle_expand(self.selected);
@@ -1180,6 +1431,18 @@ impl Component for FileTree {
                 self.selected = self.entries.len() - 1;
                 self.update_scroll();
             }
+        } else if key == keys.copy_path {
+            self.copy_path(true, cx);
+        } else if key == keys.copy_relative_path {
+            self.copy_path(false, cx);
+        } else if key == keys.copy_file_contents {
+            self.copy_file_contents(cx);
+        } else if key == keys.copy_file {
+            self.copy_file_to_clipboard(cx);
+        } else if key == keys.collapse_all {
+            self.collapse_all();
+        } else if key == keys.toggle_hidden {
+            self.toggle_hidden();
         } else {
             return EventResult::Ignored(None);
         }
@@ -1350,6 +1613,8 @@ mod tests {
             filter_query: String::new(),
             show_git_status: false,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
@@ -1357,6 +1622,30 @@ mod tests {
             marked: BTreeSet::new(),
             anchor: None,
         }
+    }
+
+    /// Build a tree for a real directory and load its root entries.
+    fn load_tree(root: &Path) -> FileTree {
+        let mut tree = FileTree {
+            root: root.to_path_buf(),
+            entries: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            filter_mode: false,
+            filter_query: String::new(),
+            show_git_status: false,
+            git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
+            max_width_percent: 35,
+            min_width: 25,
+            cached_height: 20,
+            closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
+        };
+        tree.load_directory(&tree.root.clone(), 0);
+        tree
     }
 
     // ── compute_width ────────────────────────────────────────────────
@@ -1568,6 +1857,8 @@ mod tests {
             filter_query: String::new(),
             show_git_status: false,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
@@ -1600,6 +1891,8 @@ mod tests {
             filter_query: String::new(),
             show_git_status: false,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
@@ -1652,6 +1945,8 @@ mod tests {
             filter_query: String::new(),
             show_git_status: false,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
@@ -1702,6 +1997,8 @@ mod tests {
             filter_query: String::new(),
             show_git_status: false,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
@@ -1717,6 +2014,115 @@ mod tests {
         assert!(tree.entries[0].is_dir);
         assert_eq!(tree.entries[1].name, "README.md");
         assert!(!tree.entries[1].is_dir);
+    }
+
+    #[test]
+    fn reveal_expands_ancestors_and_selects_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("deep.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+
+        let mut tree = FileTree {
+            root: dir.path().to_path_buf(),
+            entries: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            filter_mode: false,
+            filter_query: String::new(),
+            show_git_status: false,
+            git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
+            max_width_percent: 35,
+            min_width: 25,
+            cached_height: 20,
+            closed: false,
+            marked: BTreeSet::new(),
+            anchor: None,
+        };
+        tree.load_directory(&tree.root.clone(), 0);
+
+        // The deeply nested file is not visible until its ancestors are expanded.
+        assert!(!tree.entries.iter().any(|e| e.path == file));
+
+        tree.reveal(&file);
+
+        assert_eq!(tree.entries[tree.selected].path, file);
+        assert!(tree
+            .entries
+            .iter()
+            .any(|e| e.is_dir && e.expanded && e.path == dir.path().join("a")));
+        assert!(tree
+            .entries
+            .iter()
+            .any(|e| e.is_dir && e.expanded && e.path == nested));
+    }
+
+    #[test]
+    fn is_hidden_detects_dotfiles() {
+        assert!(is_hidden(Path::new("/root/.gitignore")));
+        assert!(!is_hidden(Path::new("/root/main.rs")));
+    }
+
+    #[test]
+    fn hidden_files_can_be_filtered_out() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".hidden"), "x").unwrap();
+        fs::write(dir.path().join("visible.txt"), "x").unwrap();
+
+        let mut tree = load_tree(dir.path());
+        assert_eq!(tree.entries.len(), 2);
+
+        tree.show_hidden = false;
+        tree.entries.clear();
+        tree.load_directory(&tree.root.clone(), 0);
+        assert_eq!(tree.entries.len(), 1);
+        assert_eq!(tree.entries[0].name, "visible.txt");
+    }
+
+    #[test]
+    fn collapse_all_collapses_every_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("file.rs"), "x").unwrap();
+
+        let mut tree = load_tree(dir.path());
+        let sub_idx = tree.entries.iter().position(|e| e.is_dir).unwrap();
+        tree.toggle_expand(sub_idx);
+        assert!(tree.entries.iter().any(|entry| entry.expanded));
+
+        tree.collapse_all();
+        assert!(tree.entries.iter().all(|entry| !entry.expanded));
+        assert_eq!(tree.entries.len(), 1);
+    }
+
+    #[test]
+    fn collapse_toggle_uses_parent_of_current_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("file.rs"), "x").unwrap();
+
+        let mut tree = load_tree(dir.path());
+        let sub_idx = tree.entries.iter().position(|e| e.is_dir).unwrap();
+        tree.toggle_expand(sub_idx);
+        // Select the file inside the directory.
+        tree.selected = tree.entries.iter().position(|e| !e.is_dir).unwrap();
+
+        // `h` on a file collapses the directory containing it.
+        tree.toggle_collapse_current();
+        assert!(tree.entries.iter().all(|entry| !entry.expanded));
+
+        // `h` on the directory expands it again.
+        tree.selected = tree.entries.iter().position(|e| e.is_dir).unwrap();
+        tree.toggle_collapse_current();
+        assert!(tree
+            .entries
+            .iter()
+            .any(|entry| entry.is_dir && entry.expanded));
     }
 
     // ── closed flag ─────────────────────────────────────────────────
@@ -1911,6 +2317,8 @@ mod tests {
             filter_query: String::new(),
             show_git_status: false,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
@@ -1939,6 +2347,8 @@ mod tests {
             filter_query: String::new(),
             show_git_status: false,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,
@@ -1974,6 +2384,8 @@ mod tests {
             filter_query: String::new(),
             show_git_status: false,
             git_status: HashMap::new(),
+            show_hidden: true,
+            show_ignored: true,
             max_width_percent: 35,
             min_width: 25,
             cached_height: 20,

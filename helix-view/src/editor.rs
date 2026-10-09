@@ -329,6 +329,21 @@ pub struct FileTreeKeys {
     pub move_down: KeyEvent,
     /// Rename the selected file/directory. Defaults to `r`.
     pub rename: KeyEvent,
+    /// Open the selected file in a vertical split. Defaults to `S-ret`.
+    pub split_open: KeyEvent,
+    /// Copy the absolute path of the selection to the system clipboard. Defaults to `y`.
+    pub copy_path: KeyEvent,
+    /// Copy the path of the selection relative to the workspace root. Defaults to `Y`.
+    pub copy_relative_path: KeyEvent,
+    /// Copy the contents of the selected file to the system clipboard. Defaults to `C-y`.
+    pub copy_file_contents: KeyEvent,
+    /// Copy the selected file itself to the system clipboard so it can be pasted in a file
+    /// manager. Defaults to `C-S-y`.
+    pub copy_file: KeyEvent,
+    /// Collapse every expanded directory. Defaults to `H`.
+    pub collapse_all: KeyEvent,
+    /// Toggle visibility of hidden (dot) files and ignored files. Defaults to `.`.
+    pub toggle_hidden: KeyEvent,
 }
 
 impl Default for FileTreeKeys {
@@ -357,6 +372,22 @@ impl Default for FileTreeKeys {
             move_up: key(KeyCode::Char('k')),
             move_down: key(KeyCode::Char('j')),
             rename: key(KeyCode::Char('r')),
+            split_open: KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::SHIFT,
+            },
+            copy_path: key(KeyCode::Char('y')),
+            copy_relative_path: key(KeyCode::Char('Y')),
+            copy_file_contents: KeyEvent {
+                code: KeyCode::Char('y'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            copy_file: KeyEvent {
+                code: KeyCode::Char('Y'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            collapse_all: key(KeyCode::Char('H')),
+            toggle_hidden: key(KeyCode::Char('.')),
         }
     }
 }

@@ -139,3 +139,117 @@ async fn file_tree_open_behavior_manual_stays_open() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// The workspace root helix would use, found by walking up for `.git`.
+fn workspace_root() -> std::path::PathBuf {
+    let mut dir = std::env::current_dir().expect("cwd");
+    loop {
+        if dir.join(".git").exists() {
+            return dir;
+        }
+        if !dir.pop() {
+            return std::env::current_dir().expect("cwd");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_tree_toggle_reveals_current_file_by_default() -> anyhow::Result<()> {
+    let readme = workspace_root().join("README.md");
+    if !readme.exists() {
+        // Nothing to reveal in this environment.
+        return Ok(());
+    }
+
+    let mut app = AppBuilder::new().with_file(readme.clone(), None).build()?;
+
+    test_key_sequences(
+        &mut app,
+        vec![(
+            Some("<space>e"),
+            Some(&|app| {
+                let tree = editor_view(app).sidebar.as_ref().unwrap();
+                assert_eq!(tree.entries[tree.selected].path, readme);
+            }),
+        )],
+        false,
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_tree_toggle_hidden_hides_dotfiles() -> anyhow::Result<()> {
+    let mut app = AppBuilder::new().build()?;
+
+    test_key_sequences(
+        &mut app,
+        vec![
+            (
+                Some("<space>e"),
+                Some(&|app| {
+                    let tree = editor_view(app).sidebar.as_ref().unwrap();
+                    // The workspace root has dotfiles (e.g. `.git`).
+                    assert!(tree.entries.iter().any(|entry| entry.name.starts_with('.')));
+                }),
+            ),
+            (
+                Some("."),
+                Some(&|app| {
+                    let tree = editor_view(app).sidebar.as_ref().unwrap();
+                    assert!(tree
+                        .entries
+                        .iter()
+                        .all(|entry| !entry.name.starts_with('.')));
+                }),
+            ),
+            (
+                Some("."),
+                Some(&|app| {
+                    let tree = editor_view(app).sidebar.as_ref().unwrap();
+                    assert!(tree.entries.iter().any(|entry| entry.name.starts_with('.')));
+                }),
+            ),
+        ],
+        false,
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_tree_collapse_all() -> anyhow::Result<()> {
+    let mut app = AppBuilder::new().build()?;
+
+    test_key_sequences(
+        &mut app,
+        vec![
+            (Some("<space>e"), None),
+            // Expand the first directory.
+            (
+                Some("l"),
+                Some(&|app| {
+                    let tree = editor_view(app).sidebar.as_ref().unwrap();
+                    assert!(tree
+                        .entries
+                        .iter()
+                        .any(|entry| entry.is_dir && entry.expanded));
+                }),
+            ),
+            // `H` collapses everything.
+            (
+                Some("H"),
+                Some(&|app| {
+                    let tree = editor_view(app).sidebar.as_ref().unwrap();
+                    assert!(tree.entries.iter().all(|entry| !entry.expanded));
+                }),
+            ),
+        ],
+        false,
+    )
+    .await?;
+
+    Ok(())
+}
