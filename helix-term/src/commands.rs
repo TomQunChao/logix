@@ -3516,6 +3516,8 @@ fn changed_file_picker(cx: &mut Context) {
     pub struct FileChangeData {
         cwd: PathBuf,
         style_untracked: Style,
+        style_added: Style,
+        style_ignored: Style,
         style_modified: Style,
         style_conflict: Style,
         style_deleted: Style,
@@ -3530,6 +3532,7 @@ fn changed_file_picker(cx: &mut Context) {
     }
 
     let added = cx.editor.theme.get("diff.plus");
+    let ignored = cx.editor.theme.get("ui.text.inactive");
     let modified = cx.editor.theme.get("diff.delta");
     let conflict = cx.editor.theme.get("diff.delta.conflict");
     let deleted = cx.editor.theme.get("diff.minus");
@@ -3539,6 +3542,8 @@ fn changed_file_picker(cx: &mut Context) {
         PickerColumn::new("change", |change: &FileChange, data: &FileChangeData| {
             match change {
                 FileChange::Untracked { .. } => Span::styled("+ untracked", data.style_untracked),
+                FileChange::Added { .. } => Span::styled("+ added", data.style_added),
+                FileChange::Ignored { .. } => Span::styled("! ignored", data.style_ignored),
                 FileChange::Modified { .. } => Span::styled("~ modified", data.style_modified),
                 FileChange::Conflict { .. } => Span::styled("x conflict", data.style_conflict),
                 FileChange::Deleted { .. } => Span::styled("- deleted", data.style_deleted),
@@ -3555,6 +3560,8 @@ fn changed_file_picker(cx: &mut Context) {
             };
             match change {
                 FileChange::Untracked { path } => display_path(path),
+                FileChange::Added { path } => display_path(path),
+                FileChange::Ignored { path } => display_path(path),
                 FileChange::Modified { path } => display_path(path),
                 FileChange::Conflict { path } => display_path(path),
                 FileChange::Deleted { path } => display_path(path),
@@ -3573,6 +3580,8 @@ fn changed_file_picker(cx: &mut Context) {
         FileChangeData {
             cwd: cwd.clone(),
             style_untracked: added,
+            style_added: added,
+            style_ignored: ignored,
             style_modified: modified,
             style_conflict: conflict,
             style_deleted: deleted,
@@ -3604,7 +3613,9 @@ fn changed_file_picker(cx: &mut Context) {
     cx.editor
         .diff_providers
         .clone()
-        .for_each_changed_file(cwd, trust_full, move |change| match change {
+        // Ignored files are only shown in the file tree, so they aren't collected here.
+        .for_each_changed_file(cwd, trust_full, false, move |change| match change {
+            Ok(FileChange::Ignored { .. }) => true,
             Ok(change) => injector.push(change).is_ok(),
             Err(err) => {
                 status::report_blocking(err);

@@ -27,19 +27,23 @@ use super::{Prompt, PromptEvent};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitStatus {
     Untracked,
-    Modified,
     Added,
+    Ignored,
+    Modified,
     Deleted,
     Renamed,
     Conflict,
 }
 
 impl GitStatus {
+    /// The short badge shown after the file name. Empty for statuses that are conveyed by color
+    /// alone (e.g. ignored files), so they don't add noise to every entry.
     fn label(&self) -> &'static str {
         match self {
             Self::Untracked => "?",
-            Self::Modified => "M",
             Self::Added => "A",
+            Self::Ignored => "",
+            Self::Modified => "M",
             Self::Deleted => "D",
             Self::Renamed => "R",
             Self::Conflict => "C",
@@ -142,6 +146,7 @@ fn file_icon(name: &str) -> &'static str {
 fn git_status_theme_key(status: GitStatus) -> &'static str {
     match status {
         GitStatus::Untracked | GitStatus::Added => "diff.plus",
+        GitStatus::Ignored => "ui.text.inactive",
         GitStatus::Modified => "diff.delta",
         GitStatus::Renamed => "diff.delta.moved",
         GitStatus::Deleted => "diff.minus",
@@ -363,12 +368,15 @@ impl FileTree {
         editor
             .diff_providers
             .clone()
-            .for_each_changed_file(root, trust_full, move |change| {
+            // The tree also wants ignored files (shown dimmed), unlike the changed-file picker.
+            .for_each_changed_file(root, trust_full, true, move |change| {
                 use helix_vcs::FileChange;
                 match change {
                     Ok(change) => {
                         let status = match change {
                             FileChange::Untracked { .. } => GitStatus::Untracked,
+                            FileChange::Added { .. } => GitStatus::Added,
+                            FileChange::Ignored { .. } => GitStatus::Ignored,
                             FileChange::Modified { .. } => GitStatus::Modified,
                             FileChange::Conflict { .. } => GitStatus::Conflict,
                             FileChange::Deleted { .. } => GitStatus::Deleted,
@@ -417,7 +425,10 @@ impl FileTree {
                 let icon = 2; // "▸ "/"▾ " for directories, "<glyph> " for files
                 let mark = if self.marked.contains(&e.path) { 2 } else { 0 }; // "● "
                 let name = e.name.width();
-                let git = if e.git_status.is_some() { 2 } else { 0 };
+                // Only statuses with a visible badge (e.g. not ignored) reserve space for it.
+                let git = e
+                    .git_status
+                    .map_or(0, |status| if status.label().is_empty() { 0 } else { 2 });
                 indent + icon + mark + name + git + 2 // +2 for padding
             })
             .max()
@@ -948,10 +959,13 @@ impl FileTree {
 
         // Git status
         if let Some(status) = entry.git_status {
-            spans.push(Span::styled(
-                format!(" {}", status.label()),
-                git_status_style(theme, status),
-            ));
+            // Statuses without a badge (e.g. ignored) are conveyed by color alone.
+            if !status.label().is_empty() {
+                spans.push(Span::styled(
+                    format!(" {}", status.label()),
+                    git_status_style(theme, status),
+                ));
+            }
         }
 
         let line = Spans::from(spans);
@@ -1430,10 +1444,19 @@ mod tests {
     fn git_statuses_map_to_theme_keys() {
         assert_eq!(git_status_theme_key(GitStatus::Untracked), "diff.plus");
         assert_eq!(git_status_theme_key(GitStatus::Added), "diff.plus");
+        assert_eq!(git_status_theme_key(GitStatus::Ignored), "ui.text.inactive");
         assert_eq!(git_status_theme_key(GitStatus::Modified), "diff.delta");
         assert_eq!(git_status_theme_key(GitStatus::Renamed), "diff.delta.moved");
         assert_eq!(git_status_theme_key(GitStatus::Deleted), "diff.minus");
         assert_eq!(git_status_theme_key(GitStatus::Conflict), "error");
+    }
+
+    #[test]
+    fn ignored_has_no_badge_but_others_do() {
+        assert_eq!(GitStatus::Ignored.label(), "");
+        assert_eq!(GitStatus::Added.label(), "A");
+        assert_eq!(GitStatus::Untracked.label(), "?");
+        assert_eq!(GitStatus::Modified.label(), "M");
     }
 
     // ── navigation ──────────────────────────────────────────────────

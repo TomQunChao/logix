@@ -62,18 +62,24 @@ impl DiffProviderRegistry {
     }
 
     /// Fire-and-forget changed file iteration. Runs everything in a background task. Keeps
-    /// iteration until `on_change` returns `false`.
+    /// iteration until `on_change` returns `false`. When `include_ignored` is set, ignored
+    /// files are also reported as [`FileChange::Ignored`].
     pub fn for_each_changed_file(
         self,
         cwd: PathBuf,
         trust_full: bool,
+        include_ignored: bool,
         f: impl Fn(Result<FileChange>) -> bool + Send + 'static,
     ) {
         tokio::task::spawn_blocking(move || {
             if self
                 .providers
                 .iter()
-                .find_map(|provider| provider.for_each_changed_file(&cwd, trust_full, &f).ok())
+                .find_map(|provider| {
+                    provider
+                        .for_each_changed_file(&cwd, trust_full, include_ignored, &f)
+                        .ok()
+                })
                 .is_none()
             {
                 f(Err(anyhow!("no diff provider returns success")));
@@ -131,11 +137,12 @@ impl DiffProvider {
         &self,
         cwd: &Path,
         trust_full: bool,
+        include_ignored: bool,
         f: impl Fn(Result<FileChange>) -> bool,
     ) -> Result<()> {
         match self {
             #[cfg(feature = "git")]
-            Self::Git => git::for_each_changed_file(cwd, trust_full, f),
+            Self::Git => git::for_each_changed_file(cwd, trust_full, include_ignored, f),
             Self::None => bail!("No diff support compiled in"),
         }
     }

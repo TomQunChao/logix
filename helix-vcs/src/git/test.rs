@@ -2,7 +2,7 @@ use std::{fs::File, io::Write, path::Path, process::Command};
 
 use tempfile::TempDir;
 
-use crate::git;
+use crate::{git, FileChange};
 
 fn exec_git_cmd(args: &str, git_dir: &Path) {
     let res = Command::new("git")
@@ -155,4 +155,86 @@ fn symlink_to_git_repo() {
 
     assert_eq!(git::get_diff_base(&file_link, true).unwrap(), contents);
     assert_eq!(git::get_diff_base(&file, true).unwrap(), contents);
+}
+
+fn collect_changes(repo: &Path, include_ignored: bool) -> Vec<FileChange> {
+    let changes = std::cell::RefCell::new(Vec::new());
+    git::for_each_changed_file(repo, true, include_ignored, |change| {
+        changes
+            .borrow_mut()
+            .push(change.expect("status should not error"));
+        true
+    })
+    .expect("git status should succeed");
+    changes.into_inner()
+}
+
+#[test]
+fn staged_addition_is_reported_as_added() {
+    let temp_git = empty_git_repo();
+    let tracked = temp_git.path().join("tracked.txt");
+    File::create(&tracked).unwrap().write_all(b"foo").unwrap();
+    create_commit(temp_git.path(), true);
+
+    let new_file = temp_git.path().join("new.txt");
+    File::create(&new_file).unwrap().write_all(b"bar").unwrap();
+    exec_git_cmd("add new.txt", temp_git.path());
+
+    let changes = collect_changes(temp_git.path(), false);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, FileChange::Added { path } if path == &new_file)),
+        "expected {new_file:?} to be reported as Added, got {changes:?}"
+    );
+}
+
+#[test]
+fn ignored_file_is_reported_only_when_requested() {
+    let temp_git = empty_git_repo();
+    let tracked = temp_git.path().join("tracked.txt");
+    File::create(&tracked).unwrap().write_all(b"foo").unwrap();
+    let gitignore = temp_git.path().join(".gitignore");
+    File::create(&gitignore)
+        .unwrap()
+        .write_all(b"*.log\n")
+        .unwrap();
+    create_commit(temp_git.path(), true);
+
+    let ignored = temp_git.path().join("debug.log");
+    File::create(&ignored).unwrap().write_all(b"junk").unwrap();
+
+    let without = collect_changes(temp_git.path(), false);
+    assert!(
+        !without
+            .iter()
+            .any(|c| matches!(c, FileChange::Ignored { .. })),
+        "ignored files must not be reported unless requested, got {without:?}"
+    );
+
+    let with = collect_changes(temp_git.path(), true);
+    assert!(
+        with.iter()
+            .any(|c| matches!(c, FileChange::Ignored { path } if path == &ignored)),
+        "expected {ignored:?} to be reported as Ignored, got {with:?}"
+    );
+}
+
+#[test]
+fn untracked_file_is_reported() {
+    let temp_git = empty_git_repo();
+    let tracked = temp_git.path().join("tracked.txt");
+    File::create(&tracked).unwrap().write_all(b"foo").unwrap();
+    create_commit(temp_git.path(), true);
+
+    let untracked = temp_git.path().join("fresh.txt");
+    File::create(&untracked).unwrap().write_all(b"new").unwrap();
+
+    let changes = collect_changes(temp_git.path(), false);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, FileChange::Untracked { path } if path == &untracked)),
+        "expected {untracked:?} to be reported as Untracked, got {changes:?}"
+    );
 }
