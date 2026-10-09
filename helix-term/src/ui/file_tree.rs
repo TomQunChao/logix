@@ -302,6 +302,24 @@ impl FileTree {
         self.scroll = state.scroll;
     }
 
+    /// The git status for `path`, inheriting `Ignored` from an ignored ancestor directory.
+    ///
+    /// Git reports a whole ignored directory as a single entry, so its children are not in the
+    /// status map; they inherit the ignored status here instead.
+    fn git_status_for(&self, path: &Path) -> Option<GitStatus> {
+        if let Some(status) = self.git_status.get(path).copied() {
+            return Some(status);
+        }
+        let mut ancestor = path.parent();
+        while let Some(dir) = ancestor {
+            if self.git_status.get(dir).copied() == Some(GitStatus::Ignored) {
+                return Some(GitStatus::Ignored);
+            }
+            ancestor = dir.parent();
+        }
+        None
+    }
+
     /// Load directory contents at the given path and depth
     fn load_directory(&mut self, path: &Path, depth: usize) {
         let entries = match fs::read_dir(path) {
@@ -317,8 +335,8 @@ impl FileTree {
             let is_dir = path.is_dir();
             let mut file_entry = FileEntry::new(path, is_dir, depth);
 
-            // Apply git status if available
-            file_entry.git_status = self.git_status.get(&file_entry.path).copied();
+            // Apply git status if available (children of an ignored directory inherit it)
+            file_entry.git_status = self.git_status_for(&file_entry.path);
 
             if is_dir {
                 dirs.push(file_entry);
@@ -487,7 +505,7 @@ impl FileTree {
             let path = entry.path();
             let is_dir = path.is_dir();
             let mut file_entry = FileEntry::new(path, is_dir, depth);
-            file_entry.git_status = self.git_status.get(&file_entry.path).copied();
+            file_entry.git_status = self.git_status_for(&file_entry.path);
 
             if is_dir {
                 dirs.push(file_entry);
@@ -1457,6 +1475,24 @@ mod tests {
         assert_eq!(GitStatus::Added.label(), "A");
         assert_eq!(GitStatus::Untracked.label(), "?");
         assert_eq!(GitStatus::Modified.label(), "M");
+    }
+
+    #[test]
+    fn ignored_status_is_inherited_by_descendants() {
+        let ignored_dir = PathBuf::from("/root/target");
+        let mut tree = make_tree("/root", vec![]);
+        tree.git_status
+            .insert(ignored_dir.clone(), GitStatus::Ignored);
+
+        assert_eq!(tree.git_status_for(&ignored_dir), Some(GitStatus::Ignored));
+        assert_eq!(
+            tree.git_status_for(&ignored_dir.join("debug/nested.bin")),
+            Some(GitStatus::Ignored)
+        );
+        assert_eq!(
+            tree.git_status_for(&PathBuf::from("/root/src/main.rs")),
+            None
+        );
     }
 
     // ── navigation ──────────────────────────────────────────────────
