@@ -1,5 +1,5 @@
 use helix_term::{application::Application, ui::EditorView};
-use helix_view::editor::FileTreeOpenBehavior;
+use helix_view::editor::{FileTreeOpenBehavior, FileTreeOpenTarget};
 
 use super::*;
 
@@ -15,7 +15,10 @@ fn sidebar_open(app: &Application) -> bool {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn file_tree_toggle_remembers_position() -> anyhow::Result<()> {
-    let mut app = AppBuilder::new().build()?;
+    // The default open target is the current file, so opt into the last state explicitly.
+    let mut config = Config::default();
+    config.editor.file_tree.open_target = FileTreeOpenTarget::LastState;
+    let mut app = AppBuilder::new().with_config(config).build()?;
 
     test_key_sequences(
         &mut app,

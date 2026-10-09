@@ -278,6 +278,17 @@ pub enum FileTreeOpenBehavior {
     Manual,
 }
 
+/// What the file tree selects when it is opened with the toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FileTreeOpenTarget {
+    /// Reveal and select the file of the currently focused buffer.
+    #[default]
+    CurrentFile,
+    /// Restore the browsing position from the last time the tree was open.
+    LastState,
+}
+
 /// Key bindings used inside the file tree sidebar. Each key is given as a
 /// string in the same format as keymap definitions (e.g. `"v"`, `"S-v"`,
 /// `"ret"`, `"C-c"`).
@@ -358,6 +369,9 @@ pub struct FileTreeConfig {
     /// closes it automatically, `manual` keeps it open until it is closed
     /// explicitly. Defaults to `auto`.
     pub open_behavior: FileTreeOpenBehavior,
+    /// What the tree selects when it is opened: `current-file` reveals the file of the focused
+    /// buffer, `last-state` restores the previous browsing position. Defaults to `current-file`.
+    pub open_target: FileTreeOpenTarget,
     /// Key bindings used inside the file tree sidebar.
     pub keys: FileTreeKeys,
 }
@@ -969,9 +983,9 @@ impl Default for CursorShapeConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum BufferLine {
     /// Don't render bufferline
-    #[default]
     Never,
     /// Always render
+    #[default]
     Always,
     /// Only if multiple buffers are open
     Multiple,

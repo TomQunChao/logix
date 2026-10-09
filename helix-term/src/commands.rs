@@ -3282,15 +3282,33 @@ fn file_tree_toggle(cx: &mut Context) {
                     editor_view.file_tree_state = Some(sidebar.state());
                 }
                 None => {
-                    // Sidebar was not open, open it, returning to the last
-                    // browsing position when there is one for this root.
+                    // Sidebar was not open, open it.
                     let mut tree = ui::FileTree::new(root.clone(), cx.editor);
-                    if let Some(state) = editor_view
-                        .file_tree_state
-                        .as_ref()
-                        .filter(|state| state.root == root)
-                    {
-                        tree.restore_state(state);
+                    match cx.editor.config().file_tree.open_target {
+                        // Reveal the file of the focused buffer.
+                        helix_view::editor::FileTreeOpenTarget::CurrentFile => {
+                            let current_path = cx
+                                .editor
+                                .tree
+                                .try_get(cx.editor.tree.focus)
+                                .and_then(|view| cx.editor.documents.get(&view.doc))
+                                .and_then(|doc| doc.path())
+                                .map(|path| path.to_path_buf());
+                            if let Some(path) = current_path {
+                                tree.reveal(&path);
+                            }
+                        }
+                        // Returning to the last browsing position when there is
+                        // one for this root.
+                        helix_view::editor::FileTreeOpenTarget::LastState => {
+                            if let Some(state) = editor_view
+                                .file_tree_state
+                                .as_ref()
+                                .filter(|state| state.root == root)
+                            {
+                                tree.restore_state(state);
+                            }
+                        }
                     }
                     editor_view.sidebar = Some(tree);
                 }

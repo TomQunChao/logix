@@ -639,18 +639,25 @@ impl FileTree {
         self.update_scroll();
     }
 
-    /// Moves the selection onto the entry with the given path, expanding its
-    /// parent directory when needed.
-    fn reveal(&mut self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if parent != self.root {
-                if let Some(idx) = self
-                    .entries
-                    .iter()
-                    .position(|entry| entry.is_dir && !entry.expanded && entry.path == parent)
-                {
-                    self.toggle_expand(idx);
-                }
+    /// Expand the ancestor directories of `path` and select it so it becomes visible.
+    ///
+    /// Ancestors are expanded shallowest-first, since expanding a directory is what inserts its
+    /// children into `entries`.
+    pub fn reveal(&mut self, path: &Path) {
+        let mut ancestors: Vec<PathBuf> = path
+            .ancestors()
+            .skip(1) // the path itself
+            .take_while(|ancestor| ancestor.starts_with(&self.root))
+            .map(|ancestor| ancestor.to_path_buf())
+            .collect();
+        ancestors.reverse();
+        for dir in ancestors {
+            if let Some(idx) = self
+                .entries
+                .iter()
+                .position(|entry| entry.is_dir && !entry.expanded && entry.path == dir)
+            {
+                self.toggle_expand(idx);
             }
         }
         if let Some(idx) = self.entries.iter().position(|entry| entry.path == path) {
