@@ -27,84 +27,6 @@ async fn insert_basic() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn insert_whitespace() -> anyhow::Result<()> {
-    for pair in DEFAULT_PAIRS {
-        test((
-            format!("{}#[|{}]#", pair.0, pair.1),
-            "i ",
-            format!("{} #[| ]#{}", pair.0, pair.1),
-        ))
-        .await?;
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn insert_whitespace_multi() -> anyhow::Result<()> {
-    for pair in differing_pairs() {
-        test((
-            format!(
-                indoc! {"\
-                    {open}#[|{close}]#
-                    {open}#(|{open})#{close}{close}
-                    {open}{open}#(|{close}{close})#
-                    foo#(|\n)#
-                "},
-                open = pair.0,
-                close = pair.1,
-            ),
-            "i ",
-            format!(
-                indoc! {"\
-                    {open} #[| ]#{close}
-                    {open} #(|{open})#{close}{close}
-                    {open}{open} #(| {close}{close})#
-                    foo #(|\n)#
-                "},
-                open = pair.0,
-                close = pair.1,
-            ),
-        ))
-        .await?;
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn append_whitespace_multi() -> anyhow::Result<()> {
-    for pair in differing_pairs() {
-        test((
-            format!(
-                indoc! {"\
-                    #[|{open}]#{close}
-                    #(|{open})#{open}{close}{close}
-                    #(|{open}{open})#{close}{close}
-                    #(|foo)#
-                "},
-                open = pair.0,
-                close = pair.1,
-            ),
-            "a ",
-            format!(
-                indoc! {"\
-                    #[{open}  |]#{close}
-                    #({open} {open}|)#{close}{close}
-                    #({open}{open}  |)#{close}{close}
-                    #(foo \n|)#
-                "},
-                open = pair.0,
-                close = pair.1,
-            ),
-        ))
-        .await?;
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn insert_whitespace_no_pair() -> anyhow::Result<()> {
     for pair in DEFAULT_PAIRS {
         // sanity check - do not insert extra whitespace unless immediately
@@ -129,6 +51,51 @@ async fn insert_whitespace_no_matching_pair() -> anyhow::Result<()> {
             format!("{}#[|{}]#", pair.0, pair.0),
             "i ",
             format!("{} #[|{}]#", pair.0, pair.0),
+        ))
+        .await?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn insert_space_inside_pair_inserts_single_space() -> anyhow::Result<()> {
+    // Unlike earlier Helix behaviour, typing a space inside a pair must insert exactly
+    // one space (like a standard IDE), not a pair of spaces.
+    for pair in DEFAULT_PAIRS {
+        let mut app = AppBuilder::new()
+            .with_input_text(format!("{}#[|]#{}", pair.0, pair.1))
+            .build()?;
+        let expected = format!("{} {}", pair.0, pair.1);
+        test_key_sequences(
+            &mut app,
+            vec![(
+                Some("i "),
+                Some(&|app| {
+                    let (view, doc) = helix_view::current_ref!(app.editor);
+                    assert_eq!(doc.text().to_string(), expected);
+                    let cursor = doc
+                        .selection(view.id)
+                        .primary()
+                        .cursor(doc.text().slice(..));
+                    assert_eq!(cursor, 2, "cursor should sit after the single space");
+                }),
+            )],
+            false,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_space_inside_pair_deletes_single_space() -> anyhow::Result<()> {
+    for pair in DEFAULT_PAIRS {
+        test((
+            format!("{} #[| ]#{}", pair.0, pair.1),
+            "i<backspace>",
+            format!("{}#[| ]#{}", pair.0, pair.1),
         ))
         .await?;
     }
@@ -711,98 +678,6 @@ async fn delete_multi() -> anyhow::Result<()> {
                 #(|\n)#
                 #(|\n)#
             "},
-        ))
-        .await?;
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn delete_whitespace() -> anyhow::Result<()> {
-    for pair in DEFAULT_PAIRS {
-        test((
-            format!("{} #[| ]#{}", pair.0, pair.1),
-            "i<backspace>",
-            format!("{}#[|{}]#", pair.0, pair.1),
-        ))
-        .await?;
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn delete_whitespace_after_word() -> anyhow::Result<()> {
-    for pair in DEFAULT_PAIRS {
-        test((
-            format!("foo{} #[| ]#{}", pair.0, pair.1),
-            "i<backspace>",
-            format!("foo{}#[|{}]#", pair.0, pair.1),
-        ))
-        .await?;
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn delete_whitespace_multi() -> anyhow::Result<()> {
-    for pair in DEFAULT_PAIRS {
-        test((
-            format!(
-                indoc! {"\
-                    {open} #[| ]#{close}
-                    {open} #(|{open})#{close}{close}
-                    {open}{open} #(| {close}{close})#
-                    foo #(|\n)#
-                "},
-                open = pair.0,
-                close = pair.1,
-            ),
-            "i<backspace>",
-            format!(
-                indoc! {"\
-                    {open}#[|{close}]#
-                    {open}#(|{open})#{close}{close}
-                    {open}{open}#(|{close}{close})#
-                    foo#(|\n)#
-                "},
-                open = pair.0,
-                close = pair.1,
-            ),
-        ))
-        .await?;
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn delete_append_whitespace_multi() -> anyhow::Result<()> {
-    for pair in DEFAULT_PAIRS {
-        test((
-            format!(
-                indoc! {"\
-                    #[{open} |]# {close}
-                    #({open} |)#{open}{close}{close}
-                    #({open}{open} |)# {close}{close}
-                    #(foo |)#
-                "},
-                open = pair.0,
-                close = pair.1,
-            ),
-            "a<backspace>",
-            format!(
-                indoc! {"\
-                    #[{open}{close}|]#
-                    #({open}{open}|)#{close}{close}
-                    #({open}{open}{close}|)#{close}
-                    #(foo\n|)#
-                "},
-                open = pair.0,
-                close = pair.1,
-            ),
         ))
         .await?;
     }

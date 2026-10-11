@@ -127,8 +127,6 @@ pub fn hook_insert(
             // && char_at pos == close
             return handle_insert_close(doc, range, pair);
         }
-    } else if ch.is_whitespace() {
-        return handle_insert_whitespace(doc, range, ch, pairs);
     }
 
     None
@@ -143,19 +141,6 @@ pub fn hook_delete(doc: &Rope, range: &Range, pairs: &AutoPairs) -> Option<(Dele
 
     let cur = doc.get_char(cursor)?;
     let prev = prev_char(doc, cursor)?;
-
-    // check for whitespace surrounding a pair
-    if doc.len_chars() >= 4 && prev.is_whitespace() && cur.is_whitespace() {
-        let second_prev = doc.get_char(graphemes::nth_prev_grapheme_boundary(text, cursor, 2))?;
-        let second_next = doc.get_char(graphemes::next_grapheme_boundary(text, cursor))?;
-        log::debug!("second_prev: {}, second_next: {}", second_prev, second_next);
-
-        if let Some(pair) = pairs.get(second_prev) {
-            if pair.open == second_prev && pair.close == second_next {
-                return handle_delete(doc, range);
-            }
-        }
-    }
 
     let pair = pairs.get(cur)?;
 
@@ -200,30 +185,6 @@ pub fn handle_delete(doc: &Rope, range: &Range) -> Option<(Deletion, Range)> {
     );
 
     Some((delete, next_range))
-}
-
-fn handle_insert_whitespace(
-    doc: &Rope,
-    range: &Range,
-    ch: char,
-    pairs: &AutoPairs,
-) -> Option<(Change, Range)> {
-    let text = doc.slice(..);
-    let cursor = range.cursor(text);
-    let cur = doc.get_char(cursor)?;
-    let prev = prev_char(doc, cursor)?;
-    let pair = pairs.get(cur)?;
-
-    if pair.open != prev || pair.close != cur {
-        return None;
-    }
-
-    let whitespace_pair = Pair {
-        open: ch,
-        close: ch,
-    };
-
-    handle_insert_same(doc, range, &whitespace_pair)
 }
 
 fn prev_char(doc: &Rope, pos: usize) -> Option<char> {
