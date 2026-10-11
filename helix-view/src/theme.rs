@@ -250,11 +250,13 @@ impl Loader {
     }
 
     pub fn default_theme(&self, true_color: bool) -> Theme {
-        if true_color {
-            self.default()
-        } else {
-            self.base16_default()
-        }
+        self.load("base16_transparent").unwrap_or_else(|_| {
+            if true_color {
+                self.default()
+            } else {
+                self.base16_default()
+            }
+        })
     }
 
     /// Returns the default theme
@@ -669,6 +671,14 @@ impl TryFrom<Value> for ThemePalette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_theme_is_base16_transparent() {
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime");
+        let loader = Loader::new(&[runtime]);
+        assert_eq!(loader.default_theme(true).name(), "base16_transparent");
+        assert_eq!(loader.default_theme(false).name(), "base16_transparent");
+    }
 
     #[test]
     fn test_parse_style_string() {
