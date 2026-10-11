@@ -532,6 +532,9 @@ pub struct Config {
     /// Whether to color modes with different colors. Defaults to `false`.
     pub color_modes: bool,
     pub soft_wrap: SoftWrap,
+    /// Show inline git blame (author, time and commit) at the end of the cursor line.
+    /// Defaults to `false`.
+    pub inline_blame: bool,
     /// Workspace specific lsp ceiling dirs
     pub workspace_lsp_roots: Vec<PathBuf>,
     /// Which line ending to choose for new documents. Defaults to `native`. i.e. `crlf` on Windows, otherwise `lf`.
@@ -1369,6 +1372,7 @@ impl Default for Config {
                 enable: Some(true),
                 ..SoftWrap::default()
             },
+            inline_blame: false,
             text_width: 80,
             completion_replace: false,
             continue_comments: true,
@@ -2294,7 +2298,40 @@ impl Editor {
 
         self.switch(id, action);
 
+        self.refresh_blame(id);
+
         Ok(id)
+    }
+
+    /// (Re)compute inline git blame for `doc_id` when the feature is enabled.
+    ///
+    /// Blame is dropped on every edit (line numbers become stale) and rebuilt here
+    /// on open and after a successful save.
+    pub fn refresh_blame(&mut self, doc_id: DocumentId) {
+        if !self.config().inline_blame {
+            return;
+        }
+        let path = match self
+            .documents
+            .get(&doc_id)
+            .and_then(|doc| doc.path().map(ToOwned::to_owned))
+        {
+            Some(path) => path,
+            None => return,
+        };
+        let trust_full = match self.documents.get(&doc_id) {
+            Some(doc) => self
+                .workspace_trust
+                .query(doc.workspace_root(), TrustQuery::Git)
+                .is_trusted(),
+            None => return,
+        };
+        let blame = self.diff_providers.get_blame(&path, trust_full);
+        match (blame, self.documents.get_mut(&doc_id)) {
+            (Some(blame), Some(doc)) => doc.set_blame(blame),
+            (None, Some(doc)) => doc.clear_blame(),
+            _ => {}
+        }
     }
 
     pub fn close(&mut self, id: ViewId) {

@@ -12,6 +12,10 @@ use std::{
 #[cfg(feature = "git")]
 mod git;
 
+mod blame;
+
+pub use blame::{blame_file, BlameLine};
+
 mod diff;
 
 pub use diff::{DiffHandle, Hunk};
@@ -59,6 +63,21 @@ impl DiffProviderRegistry {
                 }
             }
         })
+    }
+
+    /// Get the per-line blame information for a file. Returns `None` when no provider
+    /// supports blame or the file cannot be blamed (e.g. it is untracked).
+    pub fn get_blame(&self, file: &Path, trust_full: bool) -> Option<Vec<BlameLine>> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_blame(file, trust_full) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    log::debug!("failed to obtain blame for {}", file.display());
+                    None
+                }
+            })
     }
 
     /// Fire-and-forget changed file iteration. Runs everything in a background task. Keeps
@@ -129,6 +148,14 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_current_head_name(file, trust_full),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_blame(&self, file: &Path, trust_full: bool) -> Result<Vec<BlameLine>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => blame::blame_file(file, trust_full),
             Self::None => bail!("No diff support compiled in"),
         }
     }

@@ -19,6 +19,8 @@ use helix_view::{
 use serde_json::json;
 use tui::backend::Backend;
 
+#[cfg(not(feature = "integration"))]
+use crate::session::SessionConfig;
 use crate::{
     args::Args,
     compositor::{Compositor, Event},
@@ -29,8 +31,6 @@ use crate::{
     session::SessionManager,
     ui::{self, overlay::overlaid},
 };
-#[cfg(not(feature = "integration"))]
-use crate::session::SessionConfig;
 
 use log::{debug, error, info, warn};
 use std::{
@@ -109,8 +109,7 @@ impl Application {
 
         use helix_view::editor::Action;
 
-        let mut theme_parent_dirs: Vec<std::path::PathBuf> =
-            helix_loader::config_dirs().to_vec();
+        let mut theme_parent_dirs: Vec<std::path::PathBuf> = helix_loader::config_dirs().to_vec();
         theme_parent_dirs.extend(helix_loader::runtime_dirs().iter().cloned());
         let theme_loader = theme::Loader::new(&theme_parent_dirs);
 
@@ -715,6 +714,9 @@ impl Application {
             "'{}' written, {lines}L {size}",
             get_relative_path(&doc_save_event.path).to_string_lossy(),
         ));
+
+        // Refresh inline git blame now that the committed text changed.
+        self.editor.refresh_blame(doc_save_event.doc_id);
     }
 
     #[inline(always)]

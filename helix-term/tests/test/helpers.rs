@@ -466,3 +466,36 @@ pub fn reload_file(file: &mut NamedTempFile) -> anyhow::Result<()> {
     *file.as_file_mut() = f;
     Ok(())
 }
+
+/// Run a git command in `dir`, panicking with the error output on failure.
+/// Used by integration tests that need a real repository.
+pub fn git(dir: &std::path::Path, args: &[&str]) {
+    use std::process::Command;
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_AUTHOR_NAME", "Test Author")
+        .env("GIT_AUTHOR_EMAIL", "author@example.com")
+        .env("GIT_COMMITTER_NAME", "Test Committer")
+        .env("GIT_COMMITTER_EMAIL", "committer@example.com")
+        .output()
+        .expect("failed to run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Initialize a git repository in `dir` with a fixed test identity.
+pub fn init_git_repo(dir: &std::path::Path) {
+    git(dir, &["init"]);
+    git(dir, &["config", "user.email", "test@helix.org"]);
+    git(dir, &["config", "user.name", "helix-test"]);
+}

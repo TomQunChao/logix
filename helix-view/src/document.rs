@@ -15,7 +15,7 @@ use helix_core::text_annotations::{InlineAnnotation, Overlay};
 use helix_event::TaskController;
 use helix_lsp::util::lsp_pos_to_pos;
 use helix_stdx::faccess::{copy_metadata, readonly};
-use helix_vcs::{DiffHandle, DiffProviderRegistry};
+use helix_vcs::{BlameLine, DiffHandle, DiffProviderRegistry};
 use std::sync::OnceLock;
 use thiserror;
 
@@ -155,6 +155,10 @@ pub struct Document {
     pub(crate) document_highlights: HashMap<ViewId, DocumentHighlights>,
     /// LSP code action hints for each view.
     pub(crate) code_action_hints: HashSet<ViewId>,
+    /// Git blame for the document, one entry per line.
+    pub(crate) blame: Option<Vec<BlameLine>>,
+    /// Git blame virtual text (end of the current line) for each view.
+    pub(crate) blame_annotations: HashMap<ViewId, Vec<InlineAnnotation>>,
     /// Set to `true` when the document is updated, reset to `false` on the next inlay hints
     /// update from the LSP
     pub inlay_hints_oudated: bool,
@@ -767,6 +771,8 @@ impl Document {
             jump_labels: HashMap::new(),
             document_highlights: HashMap::new(),
             code_action_hints: HashSet::new(),
+            blame: None,
+            blame_annotations: HashMap::new(),
             color_swatches: None,
             document_links: Vec::new(),
             color_swatch_controller: TaskController::new(),
@@ -1446,6 +1452,7 @@ impl Document {
         self.document_highlight_controllers.remove(&view_id);
         self.code_action_hints.remove(&view_id);
         self.code_action_controllers.remove(&view_id);
+        self.blame_annotations.remove(&view_id);
     }
 
     /// Apply a [`Transaction`] to the [`Document`] to change its text.
@@ -1580,6 +1587,8 @@ impl Document {
         };
 
         self.inlay_hints_oudated = true;
+        // Blame line mappings are only valid for the committed text, so drop them on edit.
+        self.clear_blame();
         for text_annotation in self.inlay_hints.values_mut() {
             let DocumentInlayHints {
                 id: _,
@@ -2491,6 +2500,94 @@ impl Document {
     pub fn has_language_server_with_feature(&self, feature: LanguageServerFeature) -> bool {
         self.language_servers_with_feature(feature).next().is_some()
     }
+
+    /// Store git blame for the document and (re)build the per-view annotations.
+    pub fn set_blame(&mut self, blame: Vec<BlameLine>) {
+        self.blame = Some(blame);
+        let views: Vec<ViewId> = self.selections.keys().copied().collect();
+        for view_id in views {
+            self.refresh_blame_annotation(view_id);
+        }
+    }
+
+    /// Drop git blame (e.g. after the file is modified) and its annotations.
+    pub fn clear_blame(&mut self) {
+        if self.blame.take().is_some() {
+            self.blame_annotations.clear();
+        }
+    }
+
+    pub fn blame(&self) -> Option<&[BlameLine]> {
+        self.blame.as_deref()
+    }
+
+    pub fn blame_annotations(&self, view_id: ViewId) -> Option<&[InlineAnnotation]> {
+        self.blame_annotations.get(&view_id).map(Vec::as_slice)
+    }
+
+    /// Recompute the end-of-line blame annotation for the cursor line of `view_id`.
+    pub(crate) fn refresh_blame_annotation(&mut self, view_id: ViewId) {
+        self.blame_annotations.remove(&view_id);
+        let Some(blame) = self.blame.as_ref() else {
+            return;
+        };
+        let Some(selection) = self.selections.get(&view_id) else {
+            return;
+        };
+        let text = self.text.slice(..);
+        let cursor = selection.primary().cursor(text);
+        let line = text.char_to_line(cursor);
+        let Some(entry) = blame.get(line) else {
+            return;
+        };
+        if entry.author.is_empty() && entry.commit.is_empty() {
+            return;
+        }
+        let line_start = text.line_to_char(line);
+        let mut anchor = line_start + text.line(line).len_chars();
+        while anchor > line_start {
+            match text.char(anchor - 1) {
+                '\n' | '\r' => anchor -= 1,
+                _ => break,
+            }
+        }
+        let annotation = InlineAnnotation::new(
+            anchor,
+            format!(
+                " {} · {} · {}",
+                entry.author,
+                format_relative_time(entry.author_time),
+                entry.short_commit(),
+            ),
+        );
+        self.blame_annotations.insert(view_id, vec![annotation]);
+    }
+
+}
+
+/// Format a Unix timestamp as a short, human readable relative time (e.g. `2 days ago`).
+fn format_relative_time(unix_time: i64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let elapsed = now.saturating_sub(unix_time);
+
+    let (count, unit) = match elapsed {
+        0..=59 => return "just now".to_string(),
+        60..=3599 => (elapsed / 60, "minute"),
+        3600..=86399 => (elapsed / 3600, "hour"),
+        86400..=2_629_799 => (elapsed / 86400, "day"),
+        2_629_800..=31_557_599 => (elapsed / 2_629_800, "month"),
+        _ => (elapsed / 31_557_600, "year"),
+    };
+    if count == 1 {
+        format!("1 {unit} ago")
+    } else {
+        format!("{count} {unit}s ago")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2768,4 +2865,55 @@ mod test {
     decode!(jis0212_decode, "jis0212", "EUC-JP");
     decode!(shift_jis_decode, "shift_jis");
     encode!(shift_jis_encode, "shift_jis");
+
+    #[test]
+    fn blame_annotation_is_placed_at_end_of_cursor_line() {
+        let mut doc = Document::from(
+            Rope::from("hello\nworld\n"),
+            None,
+            Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+            Arc::new(ArcSwap::from_pointee(syntax::Loader::default())),
+        );
+        let view = ViewId::default();
+        doc.set_selection(view, Selection::point(0));
+        doc.set_blame(vec![
+            BlameLine {
+                commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                author: "Alice".into(),
+                author_time: 0,
+                summary: "first".into(),
+            },
+            BlameLine {
+                commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                author: "Bob".into(),
+                author_time: 0,
+                summary: "second".into(),
+            },
+        ]);
+
+        let annotations = doc.blame_annotations(view).expect("blame annotation");
+        assert_eq!(annotations.len(), 1);
+        // Anchored on the newline at the end of the first line.
+        assert_eq!(annotations[0].char_idx, 5);
+        assert!(annotations[0].text.contains("Alice"));
+        assert!(annotations[0].text.contains("aaaaaaaa"));
+
+        // Moving the cursor to the second line rebuilds the annotation.
+        doc.set_selection(view, Selection::point(6));
+        doc.refresh_blame_annotation(view);
+        let annotations = doc.blame_annotations(view).expect("blame annotation");
+        assert!(annotations[0].text.contains("Bob"));
+    }
+
+    #[test]
+    fn relative_time_units() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(format_relative_time(now), "just now");
+        assert_eq!(format_relative_time(now - 60), "1 minute ago");
+        assert_eq!(format_relative_time(now - 2 * 3600), "2 hours ago");
+        assert_eq!(format_relative_time(now - 3 * 86400), "3 days ago");
+    }
 }

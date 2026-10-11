@@ -509,6 +509,11 @@ impl View {
             }
         }
 
+        if let Some(annotations) = doc.blame_annotations(self.id) {
+            let style = theme.and_then(|t| t.find_highlight("ui.virtual.git-blame"));
+            text_annotations.add_inline_annotations(annotations, style);
+        }
+
         let width = self.inner_width(doc);
         let enable_cursor_line = self
             .diagnostics_handler

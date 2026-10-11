@@ -20,6 +20,7 @@ mod test {
     mod commands;
     mod file_tree;
     mod global_replace;
+    mod inline_blame;
     mod movement;
     mod splits;
     mod terminal_title;
