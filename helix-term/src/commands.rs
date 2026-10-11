@@ -383,6 +383,7 @@ impl MappableCommand {
         search_selection_detect_word_boundaries, "Use current selection as the search pattern, automatically wrapping with `\\b` on word boundaries",
         make_search_word_bounded, "Modify current search to make it word bounded",
         global_search, "Global search in workspace folder",
+        global_search_replace, "Global search and replace in workspace folder",
         extend_line, "Select current line, if already selected, extend to another line based on the anchor",
         extend_line_below, "Select current line, if already selected, extend to next line",
         extend_line_above, "Select current line, if already selected, extend to previous line",
@@ -2788,6 +2789,203 @@ fn global_search(cx: &mut Context) {
     .with_dynamic_query(get_files, Some(275));
 
     cx.push_layer(Box::new(overlaid(picker)));
+}
+
+/// Build a `regex::Regex` for a workspace-wide replacement, honouring the
+/// editor's smart-case setting (`case_insensitive` when the pattern is all
+/// lowercase).
+fn build_replace_regex(pattern: &str, smart_case: bool) -> anyhow::Result<Regex> {
+    let case_insensitive = smart_case && !pattern.chars().any(char::is_uppercase);
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .multi_line(true)
+        .build()
+        .with_context(|| format!("invalid pattern `{pattern}`"))
+}
+
+/// Replace every match of `regex` in `text` with `replacement`.
+///
+/// Returns `None` when there is no match so callers can skip untouched files.
+fn replace_all_in_text(regex: &Regex, text: &str, replacement: &str) -> Option<String> {
+    if !regex.is_match(text) {
+        return None;
+    }
+    Some(regex.replace_all(text, replacement).into_owned())
+}
+
+/// Replace every match of `pattern` across the workspace.
+///
+/// Files that are currently open are edited in-memory (keeping undo history) and
+/// saved; files that are not open are rewritten directly on disk. Returns
+/// `(changed_files, total_matches)`.
+fn apply_global_replace(
+    editor: &mut Editor,
+    pattern: &str,
+    replacement: &str,
+    smart_case: bool,
+) -> anyhow::Result<(usize, usize)> {
+    let search_root = helix_stdx::env::current_working_dir();
+    apply_global_replace_at(editor, &search_root, pattern, replacement, smart_case)
+}
+
+/// Like [`apply_global_replace`] but searches `search_root` instead of the current
+/// working directory. Exposed for tests.
+pub fn apply_global_replace_at(
+    editor: &mut Editor,
+    search_root: &Path,
+    pattern: &str,
+    replacement: &str,
+    smart_case: bool,
+) -> anyhow::Result<(usize, usize)> {
+    let regex = build_replace_regex(pattern, smart_case)?;
+
+    if !search_root.exists() {
+        bail!("current working directory does not exist");
+    }
+
+    let config = editor.config();
+    let file_picker_config = config.file_picker.clone();
+    let absolute_root = search_root
+        .canonicalize()
+        .unwrap_or_else(|_| search_root.to_path_buf());
+    let dedup_symlinks = file_picker_config.deduplicate_links;
+
+    let mut paths = Vec::new();
+    WalkBuilder::new(search_root)
+        .hidden(file_picker_config.hidden)
+        .parents(file_picker_config.parents)
+        .ignore(file_picker_config.ignore)
+        .follow_links(file_picker_config.follow_symlinks)
+        .git_ignore(file_picker_config.git_ignore)
+        .git_global(file_picker_config.git_global)
+        .git_exclude(file_picker_config.git_exclude)
+        .max_depth(file_picker_config.max_depth)
+        .filter_entry(move |entry| filter_picker_entry(entry, &absolute_root, dedup_symlinks))
+        .add_custom_ignore_filename(helix_loader::config_dir().join("ignore"))
+        .add_custom_ignore_filename(".helix/ignore")
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .for_each(|entry| paths.push(entry.path().to_path_buf()));
+
+    let mut changed_files = 0usize;
+    let mut total_matches = 0usize;
+
+    for path in paths {
+        let doc_id = editor.document_by_path(&path).map(|doc| doc.id());
+        let text = match doc_id {
+            Some(id) => editor
+                .documents
+                .get(&id)
+                .expect("document id returned by document_by_path must exist")
+                .text()
+                .to_string(),
+            None => match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                // Unreadable (binary, permissions, bad encoding) files are skipped.
+                Err(_) => continue,
+            },
+        };
+
+        let matches = regex.find_iter(&text).count();
+        if matches == 0 {
+            continue;
+        }
+        let new_text = replace_all_in_text(&regex, &text, replacement)
+            .expect("matches were counted above, so a replacement always exists");
+
+        match doc_id {
+            Some(id) => {
+                let view_id = editor
+                    .documents
+                    .get(&id)
+                    .and_then(|doc| doc.selections().keys().copied().next())
+                    .unwrap_or_else(|| editor.get_synced_view_id(id));
+                let new_rope = Rope::from(new_text.as_ref());
+                {
+                    let doc = editor
+                        .documents
+                        .get_mut(&id)
+                        .expect("document id returned by document_by_path must exist");
+                    let view = editor.tree.get_mut(view_id);
+                    let transaction = helix_core::diff::compare_ropes(doc.text(), &new_rope);
+                    doc.apply(&transaction, view_id);
+                    doc.append_changes_to_history(view);
+                }
+                editor
+                    .save::<PathBuf>(id, None, false)
+                    .map_err(|err| anyhow!("failed to save {}: {err}", path.display()))?;
+            }
+            None => {
+                std::fs::write(&path, new_text.as_bytes())
+                    .map_err(|err| anyhow!("failed to write {}: {err}", path.display()))?;
+            }
+        }
+
+        changed_files += 1;
+        total_matches += matches;
+    }
+
+    Ok((changed_files, total_matches))
+}
+
+fn global_search_replace(cx: &mut Context) {
+    let reg = cx.register.unwrap_or('/');
+    let smart_case = cx.editor.config().search.smart_case;
+    let completions = search_completions(cx, Some(reg));
+
+    ui::raw_regex_prompt(
+        cx,
+        "global replace:".into(),
+        Some(reg),
+        move |_editor: &Editor, input: &str| {
+            completions
+                .iter()
+                .filter(|comp| comp.starts_with(input))
+                .map(|comp| (0.., comp.clone().into()))
+                .collect()
+        },
+        move |cx, _regex, pattern, event| {
+            if event != PromptEvent::Validate || pattern.is_empty() {
+                return;
+            }
+            let pattern = pattern.to_string();
+            let callback = Box::pin(async move {
+                let call: Callback =
+                    Callback::EditorCompositor(Box::new(move |_editor, compositor| {
+                        let prompt = Prompt::new(
+                            format!("replace `{pattern}` with:").into(),
+                            None,
+                            ui::completers::none,
+                            move |cx, replacement: &str, event| {
+                                if event != PromptEvent::Validate {
+                                    return;
+                                }
+                                match apply_global_replace(
+                                    cx.editor,
+                                    &pattern,
+                                    replacement,
+                                    smart_case,
+                                ) {
+                                    Ok((files, matches)) if matches > 0 => {
+                                        cx.editor.set_status(format!(
+                                            "replaced {matches} occurrence(s) in {files} file(s)"
+                                        ))
+                                    }
+                                    Ok(_) => cx.editor.set_error("no matches to replace"),
+                                    Err(err) => {
+                                        cx.editor.set_error(format!("replace failed: {err}"))
+                                    }
+                                }
+                            },
+                        );
+                        compositor.push(Box::new(prompt));
+                    }));
+                Ok(call)
+            });
+            cx.jobs.callback(callback);
+        },
+    );
 }
 
 enum Extend {
@@ -7286,5 +7484,42 @@ fn lsp_or_syntax_workspace_symbol_picker(cx: &mut Context) {
         lsp::workspace_symbol_picker(cx);
     } else {
         syntax_workspace_symbol_picker(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_replace_regex, replace_all_in_text};
+
+    fn replace(text: &str, pattern: &str, replacement: &str, smart_case: bool) -> Option<String> {
+        let regex = build_replace_regex(pattern, smart_case).unwrap();
+        replace_all_in_text(&regex, text, replacement)
+    }
+
+    #[test]
+    fn replace_all_in_text_replaces_and_supports_groups() {
+        let out = replace("foo bar foo", r"(\w+)", r"[$1]", false).unwrap();
+        assert_eq!(out, "[foo] [bar] [foo]");
+    }
+
+    #[test]
+    fn replace_all_in_text_returns_none_without_match() {
+        assert!(replace("abc", "xyz", "!", false).is_none());
+    }
+
+    #[test]
+    fn replace_all_in_text_honours_smart_case() {
+        // all-lowercase pattern is case-insensitive with smart case
+        let out = replace("Foo foo", "foo", "bar", true).unwrap();
+        assert_eq!(out, "bar bar");
+
+        // an uppercase character makes it case-sensitive
+        assert!(replace("Foo foo", "Foo", "bar", true).is_some());
+        assert!(replace("foo", "Foo", "bar", true).is_none());
+    }
+
+    #[test]
+    fn build_replace_regex_rejects_invalid_pattern() {
+        assert!(build_replace_regex("(", false).is_err());
     }
 }

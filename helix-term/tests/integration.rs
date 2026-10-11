@@ -19,6 +19,7 @@ mod test {
     mod command_line;
     mod commands;
     mod file_tree;
+    mod global_replace;
     mod movement;
     mod splits;
     mod terminal_title;
