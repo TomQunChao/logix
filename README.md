@@ -43,6 +43,55 @@ a custom renderer (similar to Emacs) using wgpu.
 Note: Only certain languages have indentation definitions at the moment. Check
 `runtime/queries/<lang>/` for `indents.scm`.
 
+# Roadmap
+
+This fork ("logix") aims to grow Helix towards a batteries-included, VS
+Code-like professional IDE while keeping the modal editing model.
+
+## Implemented in this fork
+
+- File tree sidebar (`space+e`) with per-type icons, git status colors and
+  hidden/ignored toggles.
+- Session save/restore.
+- Bufferline shown by default.
+- Soft-wrap enabled by default; default theme `base16_transparent`.
+- Global search **and replace** across the workspace (`space+/` to search,
+  `space+%` to replace).
+- Inline git blame (`editor.inline-blame = true`) showing author, relative time
+  and abbreviated commit at the end of the cursor line, styled by
+  `ui.virtual.git-blame`.
+- Code folding, driven by `folds.scm` queries when available and falling back to
+  indentation-based folds otherwise. Keybindings live under `z`: `za` toggle,
+  `zc` close, `zo` open, `zM` close all, `zR` open all.
+- Config dry-run, workspace trust gating.
+
+## Pending / TODO
+
+Other VS Code-like features that are not implemented yet (pick one to build
+next):
+
+- **Integrated terminal** (pty-backed).
+- **Extension / plugin system** (WASM or scripting runtime).
+- **Git source control panel**: stage / commit / push / revert UI, line-level
+  blame annotations for every line.
+- **Settings UI** and interactive configuration (currently TOML only).
+- **LSP / DAP / toolchain install & management UI**.
+- **Semantic highlighting** (semantic tokens) — protocol types exist but are not
+  wired into the client/renderer.
+- **Code Lens**, **call hierarchy**, **type hierarchy**.
+- **Peek definition / references** (inline popup).
+- **Inline completion / AI assistance** (Copilot-style ghost text).
+- Snippet library and interactive snippet editing (only LSP tabstops exist).
+- Persistent **Problems panel**.
+- **Multi-root workspaces**.
+- **Task runner** (`tasks.json`) and **test explorer** integration.
+- **Three-way merge / side-by-side diff editor**.
+- **Remote development** (SSH / container / WSL).
+- **Notebook / Jupyter** support.
+- **Live collaboration**.
+- Breadcrumbs, minimap, sticky scroll, outline sidebar.
+- Theme / icon marketplace and a visual keymap editor.
+
 # Installation
 
 [Installation documentation](https://docs.helix-editor.com/install.html).
