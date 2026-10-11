@@ -1366,7 +1366,7 @@ impl Default for Config {
             indent_guides: IndentGuidesConfig::default(),
             color_modes: false,
             soft_wrap: SoftWrap {
-                enable: Some(false),
+                enable: Some(true),
                 ..SoftWrap::default()
             },
             text_width: 80,
@@ -2848,5 +2848,15 @@ impl CursorCache {
 
     pub fn reset(&self) {
         self.0.set(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soft_wrap_enabled_by_default() {
+        assert_eq!(Config::default().soft_wrap.enable, Some(true));
     }
 }
