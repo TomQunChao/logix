@@ -269,27 +269,63 @@ pub fn textobject_treesitter(
     let root = syntax
         .tree_for_byte_range(byte_pos as u32, byte_pos as u32)
         .root_node();
-    let textobject_query = loader.textobject_query(syntax.layer(layer).language);
-    let get_range = move || -> Option<Range> {
-        let capture_name = format!("{}.{}", object_name, textobject); // eg. function.inner
-        let node = textobject_query?
-            .capture_nodes(&capture_name, &root, slice)?
-            .filter(|node| node.byte_range().contains(&byte_pos))
-            .min_by_key(|node| node.byte_range().len())?;
-
-        let len = slice.len_bytes();
-        let start_byte = node.start_byte();
-        let end_byte = node.end_byte();
-        if start_byte >= len || end_byte >= len {
-            return None;
-        }
-
-        let start_char = slice.byte_to_char(start_byte);
-        let end_char = slice.byte_to_char(end_byte);
-
-        Some(Range::new(start_char, end_char))
+    let Some(textobject_query) = loader.textobject_query(syntax.layer(layer).language) else {
+        return range;
     };
-    get_range().unwrap_or(range)
+
+    let len = slice.len_bytes();
+    let capture_name = format!("{}.{}", object_name, textobject);
+
+    // The exact capture requested, narrowed down to the smallest node containing the cursor.
+    let requested = textobject_query
+        .capture_nodes(&capture_name, &root, slice)
+        .into_iter()
+        .flatten()
+        .filter(|node| node.byte_range().contains(&byte_pos))
+        .min_by_key(|node| node.byte_range().len());
+
+    if let Some(node) = requested {
+        let (start_byte, end_byte) = (node.start_byte(), node.end_byte());
+        if start_byte < len && end_byte <= len {
+            let start_char = slice.byte_to_char(start_byte);
+            let end_char = slice.byte_to_char(end_byte);
+            return Range::new(start_char, end_char);
+        }
+    }
+
+    // The cursor may sit on the item's keyword (`fn`, `struct`, ...) which belongs to the
+    // `around` node but not to the `inside` node. When selecting "inside", fall back to the
+    // `inside` node contained in the smallest enclosing `around` node.
+    if matches!(textobject, TextObject::Inside) {
+        let around_name = format!("{object_name}.around");
+        let around = textobject_query
+            .capture_nodes(&around_name, &root, slice)
+            .into_iter()
+            .flatten()
+            .filter(|node| node.byte_range().contains(&byte_pos))
+            .min_by_key(|node| node.byte_range().len());
+
+        if let Some(around) = around {
+            let (around_start, around_end) = (around.start_byte(), around.end_byte());
+            let inside = textobject_query
+                .capture_nodes(&capture_name, &root, slice)
+                .into_iter()
+                .flatten()
+                .filter(|node| node.start_byte() >= around_start && node.end_byte() <= around_end)
+                .max_by_key(|node| node.byte_range().len());
+
+            if let Some(node) = inside {
+                let (start_byte, end_byte) = (node.start_byte(), node.end_byte());
+                if start_byte < len && end_byte <= len {
+                    let start_char = slice.byte_to_char(start_byte);
+                    let end_char = slice.byte_to_char(end_byte);
+                    return Range::new(start_char, end_char);
+                }
+            }
+        }
+    }
+
+    range
 }
 
 #[cfg(test)]

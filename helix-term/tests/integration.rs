@@ -25,4 +25,5 @@ mod test {
     mod movement;
     mod splits;
     mod terminal_title;
+    mod textobject;
 }
