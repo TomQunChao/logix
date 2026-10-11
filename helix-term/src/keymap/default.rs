@@ -294,8 +294,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "A-c" => toggle_line_comments,
             "?" => command_palette,
         },
-        "z" => { "View"
-            "z" | "c" => align_view_center,
+    "z" => { "View"
+            "z" => align_view_center,
             "t" => align_view_top,
             "b" => align_view_bottom,
             "m" => align_view_middle,
@@ -306,13 +306,19 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "C-u" | "backspace" => page_cursor_half_up,
             "C-d" | "space" => page_cursor_half_down,
 
+            "a" => fold_toggle,
+            "c" => fold_close,
+            "o" => fold_open,
+            "R" => fold_open_all,
+            "M" => fold_close_all,
+
             "/" => search,
             "?" => rsearch,
             "n" => search_next,
             "N" => search_prev,
         },
         "Z" => { "View" sticky=true
-            "z" | "c" => align_view_center,
+            "z" => align_view_center,
             "t" => align_view_top,
             "b" => align_view_bottom,
             "m" => align_view_middle,
@@ -322,6 +328,12 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "C-f" | "pagedown" => page_down,
             "C-u" | "backspace" => page_cursor_half_up,
             "C-d" | "space" => page_cursor_half_down,
+
+            "a" => fold_toggle,
+            "c" => fold_close,
+            "o" => fold_open,
+            "R" => fold_open_all,
+            "M" => fold_close_all,
 
             "/" => search,
             "?" => rsearch,

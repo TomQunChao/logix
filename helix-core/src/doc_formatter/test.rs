@@ -1,4 +1,5 @@
 use crate::doc_formatter::{DocumentFormatter, TextFormat};
+use crate::folds::FoldRange;
 use crate::text_annotations::{InlineAnnotation, Overlay, TextAnnotations};
 
 impl TextFormat {
@@ -53,6 +54,48 @@ fn softwrap_text(text: &str) -> String {
         0,
     )
     .collect_to_str()
+}
+
+fn folded_text(text: &str, folds: &[FoldRange]) -> String {
+    let mut annotations = TextAnnotations::default();
+    annotations.set_folds(folds);
+    DocumentFormatter::new_at_prev_checkpoint(
+        text.into(),
+        &TextFormat::new_test(false),
+        &annotations,
+        0,
+    )
+    .map(|grapheme| grapheme.raw.to_string())
+    .collect()
+}
+
+#[test]
+fn collapsed_fold_hides_its_lines() {
+    let text = "abc\ndef\nghi\n";
+    // Fold the range covering "def\nghi", keeping "def" as the header line.
+    // hide range is line 2 ("ghi"), i.e. chars 8..11.
+    let folds = [FoldRange::new(4, 11)];
+
+    let output = folded_text(text, &folds);
+    assert!(output.contains("abc"));
+    assert!(output.contains("def"));
+    assert!(output.contains('⋯'));
+    assert!(!output.contains("ghi"), "hidden line leaked: {output:?}");
+
+    // Without folds all lines are visible.
+    assert!(folded_text(text, &[]).contains("ghi"));
+}
+
+#[test]
+fn fold_covering_to_end_of_file() {
+    let text = "a\nb\nc";
+    // header line 0, hide lines 1..=2 (chars 2..5)
+    let folds = [FoldRange::new(0, 5)];
+    let output = folded_text(text, &folds);
+    assert!(output.contains('a'));
+    assert!(!output.contains('b'));
+    assert!(!output.contains('c'));
+    assert!(output.contains('⋯'));
 }
 
 #[test]

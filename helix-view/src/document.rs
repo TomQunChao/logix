@@ -9,6 +9,7 @@ use helix_core::command_line::Token;
 use helix_core::diagnostic::DiagnosticProvider;
 use helix_core::doc_formatter::TextFormat;
 use helix_core::encoding::Encoding;
+use helix_core::folds::FoldRange;
 use helix_core::snippets::{ActiveSnippet, SnippetRenderCtx};
 use helix_core::syntax::config::LanguageServerFeature;
 use helix_core::text_annotations::{InlineAnnotation, Overlay};
@@ -159,6 +160,8 @@ pub struct Document {
     pub(crate) blame: Option<Vec<BlameLine>>,
     /// Git blame virtual text (end of the current line) for each view.
     pub(crate) blame_annotations: HashMap<ViewId, Vec<InlineAnnotation>>,
+    /// Collapsed code folds for each view.
+    pub(crate) folds: HashMap<ViewId, Vec<FoldRange>>,
     /// Set to `true` when the document is updated, reset to `false` on the next inlay hints
     /// update from the LSP
     pub inlay_hints_oudated: bool,
@@ -773,6 +776,7 @@ impl Document {
             code_action_hints: HashSet::new(),
             blame: None,
             blame_annotations: HashMap::new(),
+            folds: HashMap::new(),
             color_swatches: None,
             document_links: Vec::new(),
             color_swatch_controller: TaskController::new(),
@@ -1453,6 +1457,7 @@ impl Document {
         self.code_action_hints.remove(&view_id);
         self.code_action_controllers.remove(&view_id);
         self.blame_annotations.remove(&view_id);
+        self.folds.remove(&view_id);
     }
 
     /// Apply a [`Transaction`] to the [`Document`] to change its text.
@@ -1589,6 +1594,18 @@ impl Document {
         self.inlay_hints_oudated = true;
         // Blame line mappings are only valid for the committed text, so drop them on edit.
         self.clear_blame();
+
+        for folds in self.folds.values_mut() {
+            for fold in folds.iter_mut() {
+                changes.update_positions(
+                    [
+                        (&mut fold.start, Assoc::After),
+                        (&mut fold.end, Assoc::After),
+                    ]
+                    .into_iter(),
+                );
+            }
+        }
         for text_annotation in self.inlay_hints.values_mut() {
             let DocumentInlayHints {
                 id: _,
@@ -2563,6 +2580,193 @@ impl Document {
         self.blame_annotations.insert(view_id, vec![annotation]);
     }
 
+    /// Compute the foldable ranges for the document from its syntax tree.
+    pub fn syntax_fold_ranges(&self) -> Vec<FoldRange> {
+        match &self.syntax {
+            Some(syntax) => {
+                let loader = self.syn_loader.load();
+                syntax.fold_ranges(self.text.slice(..), &loader)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Foldable ranges for the document.
+    ///
+    /// Prefers syntax-based folds (`folds.scm`); falls back to indentation-based
+    /// folds, which work for every language.
+    pub fn fold_ranges(&self) -> Vec<FoldRange> {
+        let syntax = self.syntax_fold_ranges();
+        if syntax.is_empty() {
+            self.indent_fold_ranges()
+        } else {
+            syntax
+        }
+    }
+
+    /// Indentation-based foldable ranges.
+    fn indent_fold_ranges(&self) -> Vec<FoldRange> {
+        let text = self.text.slice(..);
+        let len_lines = text.len_lines();
+        if len_lines == 0 {
+            return Vec::new();
+        }
+
+        // Leading whitespace count for each line, or `None` for blank lines.
+        let indents: Vec<Option<usize>> = (0..len_lines)
+            .map(|line| {
+                let slice = text.line(line);
+                let mut indent = 0;
+                for ch in slice.chars() {
+                    match ch {
+                        ' ' | '\t' => indent += 1,
+                        '\r' | '\n' => return None,
+                        _ => return Some(indent),
+                    }
+                }
+                None
+            })
+            .collect();
+
+        let mut ranges = Vec::new();
+        let mut push_range = |start_line: usize, end_line: usize, ranges: &mut Vec<FoldRange>| {
+            if end_line <= start_line {
+                return;
+            }
+            let start = text.line_to_char(start_line);
+            let end = if end_line + 1 >= len_lines {
+                text.len_chars()
+            } else {
+                text.line_to_char(end_line + 1)
+            };
+            if start < end {
+                ranges.push(FoldRange::new(start, end));
+            }
+        };
+
+        // Stack of currently open blocks: (line, indent).
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        let mut last_content_line = 0usize;
+        for (line, indent) in indents.iter().enumerate() {
+            let Some(indent) = *indent else {
+                continue;
+            };
+            last_content_line = line;
+            while let Some(&(open_line, open_indent)) = stack.last() {
+                if indent <= open_indent {
+                    stack.pop();
+                    push_range(open_line, line - 1, &mut ranges);
+                } else {
+                    break;
+                }
+            }
+            stack.push((line, indent));
+        }
+        for (open_line, _) in stack {
+            push_range(open_line, last_content_line, &mut ranges);
+        }
+
+        ranges.sort_by_key(|range| (range.start, range.end));
+        ranges
+    }
+
+    /// The collapsed folds for `view_id`, if any.
+    pub fn collapsed_folds(&self, view_id: ViewId) -> Option<&[FoldRange]> {
+        self.folds.get(&view_id).map(Vec::as_slice)
+    }
+
+    /// Replace the collapsed folds for `view_id`.
+    pub fn set_collapsed_folds(&mut self, view_id: ViewId, folds: Vec<FoldRange>) {
+        if folds.is_empty() {
+            self.folds.remove(&view_id);
+        } else {
+            self.folds.insert(view_id, folds);
+        }
+    }
+
+    /// Collapse/expand the fold at `char_idx` for `view_id`.
+    ///
+    /// Returns `true` if a fold was toggled.
+    pub fn toggle_fold_at(&mut self, view_id: ViewId, char_idx: usize) -> bool {
+        let ranges = self.fold_ranges();
+        // Pick the narrowest range containing the position.
+        let target = ranges
+            .iter()
+            .filter(|range| range.start <= char_idx && char_idx < range.end)
+            .min_by_key(|range| range.end - range.start)
+            .copied();
+        let Some(target) = target else {
+            return false;
+        };
+
+        let collapsed = self.folds.entry(view_id).or_default();
+        if let Some(pos) = collapsed
+            .iter()
+            .position(|fold| fold.start == target.start && fold.end == target.end)
+        {
+            collapsed.remove(pos);
+        } else {
+            collapsed.push(target);
+            collapsed.sort_by_key(|fold| fold.start);
+        }
+        if collapsed.is_empty() {
+            self.folds.remove(&view_id);
+        }
+        true
+    }
+
+    /// Collapse all foldable ranges for `view_id` that span more than one line.
+    pub fn collapse_all_folds(&mut self, view_id: ViewId) {
+        let ranges = self.fold_ranges();
+        self.set_collapsed_folds(view_id, ranges);
+    }
+
+    /// Expand all folds for `view_id`.
+    pub fn expand_all_folds(&mut self, view_id: ViewId) {
+        self.folds.remove(&view_id);
+    }
+
+    /// Collapse the narrowest fold containing `char_idx` for `view_id`.
+    pub fn close_fold_at(&mut self, view_id: ViewId, char_idx: usize) -> bool {
+        let target = self
+            .fold_ranges()
+            .into_iter()
+            .filter(|range| range.start <= char_idx && char_idx < range.end)
+            .min_by_key(|range| range.end - range.start);
+        let Some(target) = target else {
+            return false;
+        };
+        let collapsed = self.folds.entry(view_id).or_default();
+        if !collapsed
+            .iter()
+            .any(|fold| fold.start == target.start && fold.end == target.end)
+        {
+            collapsed.push(target);
+            collapsed.sort_by_key(|fold| fold.start);
+        }
+        true
+    }
+
+    /// Expand the innermost collapsed fold containing `char_idx` for `view_id`.
+    pub fn open_fold_at(&mut self, view_id: ViewId, char_idx: usize) -> bool {
+        let Some(collapsed) = self.folds.get_mut(&view_id) else {
+            return false;
+        };
+        let target = collapsed
+            .iter()
+            .enumerate()
+            .filter(|(_, fold)| fold.start <= char_idx && char_idx < fold.end)
+            .min_by_key(|(_, fold)| fold.end - fold.start)
+            .map(|(idx, _)| idx);
+        let Some(idx) = target else {
+            return false;
+        };
+        collapsed.remove(idx);
+        if collapsed.is_empty() {
+            self.folds.remove(&view_id);
+        }
+        true
+    }
 }
 
 /// Format a Unix timestamp as a short, human readable relative time (e.g. `2 days ago`).
@@ -2903,6 +3107,33 @@ mod test {
         doc.refresh_blame_annotation(view);
         let annotations = doc.blame_annotations(view).expect("blame annotation");
         assert!(annotations[0].text.contains("Bob"));
+    }
+
+    #[test]
+    fn indent_fold_ranges_cover_indented_blocks() {
+        let doc = Document::from(
+            Rope::from("fn foo() {\n    a();\n    b();\n}\nc();\n"),
+            None,
+            Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+            Arc::new(ArcSwap::from_pointee(syntax::Loader::default())),
+        );
+
+        let ranges = doc.fold_ranges();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start, 0);
+        // hides lines 1..=2, i.e. up to the start of line 3.
+        assert_eq!(ranges[0].end, doc.text().line_to_char(3));
+    }
+
+    #[test]
+    fn indent_fold_ranges_empty_for_flat_text() {
+        let doc = Document::from(
+            Rope::from("a\nb\nc\n"),
+            None,
+            Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+            Arc::new(ArcSwap::from_pointee(syntax::Loader::default())),
+        );
+        assert!(doc.fold_ranges().is_empty());
     }
 
     #[test]

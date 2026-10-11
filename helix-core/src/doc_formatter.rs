@@ -173,6 +173,13 @@ impl Default for TextFormat {
 pub struct DocumentFormatter<'t> {
     text_fmt: &'t TextFormat,
     annotations: &'t TextAnnotations<'t>,
+    /// The full document slice, needed to recreate the grapheme iterator when
+    /// skipping collapsed folds.
+    text: RopeSlice<'t>,
+    /// Hidden char ranges for collapsed folds `(hide_start, hide_end)`, sorted.
+    hidden_folds: Vec<(usize, usize)>,
+    /// Index of the next hidden fold to consider.
+    fold_cursor: usize,
 
     /// The visual position at the end of the last yielded word boundary
     visual_pos: Position,
@@ -216,9 +223,28 @@ impl<'t> DocumentFormatter<'t> {
         let block_char_idx = text.line_to_char(block_line_idx);
         annotations.reset_pos(block_char_idx);
 
+        // Precompute the hidden char ranges for collapsed folds. Folds hide everything
+        // after the header line up to the end of the fold node.
+        let mut hidden_folds: Vec<(usize, usize)> = annotations
+            .folds()
+            .iter()
+            .filter_map(|fold| {
+                let header_line = text.char_to_line(fold.start.min(text.len_chars()));
+                let next_line = (header_line + 1).min(text.len_lines().saturating_sub(1));
+                let hide_start = text.line_to_char(next_line);
+                let hide_end = fold.end.min(text.len_chars());
+                (hide_start < hide_end).then_some((hide_start, hide_end))
+            })
+            .collect();
+        hidden_folds.sort_unstable();
+        hidden_folds.dedup();
+
         DocumentFormatter {
             text_fmt,
             annotations,
+            text,
+            hidden_folds,
+            fold_cursor: 0,
             visual_pos: Position { row: 0, col: 0 },
             graphemes: text.slice(block_char_idx..).graphemes(),
             char_pos: block_char_idx,
@@ -259,6 +285,28 @@ impl<'t> DocumentFormatter<'t> {
     }
 
     fn advance_grapheme(&mut self, col: usize, char_pos: usize) -> Option<GraphemeWithSource<'t>> {
+        // Skip collapsed folds, emitting a single placeholder grapheme at their start.
+        while self.fold_cursor < self.hidden_folds.len()
+            && self.hidden_folds[self.fold_cursor].1 <= char_pos
+        {
+            self.fold_cursor += 1;
+        }
+        if let Some(&(hide_start, hide_end)) = self.hidden_folds.get(self.fold_cursor) {
+            if hide_start == char_pos {
+                self.char_pos = hide_end;
+                self.graphemes = self.text.slice(hide_end..).graphemes();
+                self.line_pos = self.text.char_to_line(hide_end);
+                self.annotations.reset_pos(hide_end);
+                self.fold_cursor += 1;
+                return Some(GraphemeWithSource::new(
+                    "⋯".into(),
+                    col,
+                    self.text_fmt.tab_width,
+                    GraphemeSource::VirtualText { highlight: None },
+                ));
+            }
+        }
+
         let (grapheme, source) =
             if let Some((grapheme, highlight)) = self.next_inline_annotation_grapheme(char_pos) {
                 (grapheme.into(), GraphemeSource::VirtualText { highlight })

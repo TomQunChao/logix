@@ -514,6 +514,10 @@ impl View {
             text_annotations.add_inline_annotations(annotations, style);
         }
 
+        if let Some(folds) = doc.collapsed_folds(self.id) {
+            text_annotations.set_folds(folds);
+        }
+
         let width = self.inner_width(doc);
         let enable_cursor_line = self
             .diagnostics_handler

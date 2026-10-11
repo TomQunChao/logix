@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::ptr::NonNull;
 
 use crate::doc_formatter::FormattedGrapheme;
+use crate::folds::FoldRange;
 use crate::syntax::{Highlight, OverlayHighlights};
 use crate::{Position, Tendril};
 
@@ -279,6 +280,8 @@ pub struct TextAnnotations<'a> {
     inline_annotations: Vec<Layer<'a, InlineAnnotation, Option<Highlight>>>,
     overlays: Vec<Layer<'a, Overlay, Option<Highlight>>>,
     line_annotations: Vec<(Cell<usize>, RawBox<dyn LineAnnotation + 'a>)>,
+    /// Collapsed folds to hide while formatting.
+    folds: Option<&'a [FoldRange]>,
 }
 
 impl Debug for TextAnnotations<'_> {
@@ -368,6 +371,17 @@ impl<'a> TextAnnotations<'a> {
     /// so that virtual text lines are automatically skipped.
     pub fn clear_line_annotations(&mut self) {
         self.line_annotations.clear();
+    }
+
+    /// Set the collapsed fold ranges to hide while formatting.
+    pub fn set_folds(&mut self, folds: &'a [FoldRange]) -> &mut Self {
+        self.folds = Some(folds);
+        self
+    }
+
+    /// The collapsed fold ranges, if any.
+    pub(crate) fn folds(&self) -> &[FoldRange] {
+        self.folds.unwrap_or(&[])
     }
 
     pub(crate) fn next_inline_annotation_at(

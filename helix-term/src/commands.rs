@@ -533,6 +533,11 @@ impl MappableCommand {
         select_prev_sibling, "Select previous sibling the in syntax tree",
         select_all_siblings, "Select all siblings of the current node",
         select_all_children, "Select all children of the current node",
+        fold_toggle, "Toggle fold at cursor",
+        fold_open, "Open fold at cursor",
+        fold_close, "Close fold at cursor",
+        fold_open_all, "Open all folds",
+        fold_close_all, "Close all folds",
         jump_forward, "Jump forward on jumplist",
         jump_backward, "Jump backward on jumplist",
         save_selection, "Save current selection to jumplist",
@@ -6011,6 +6016,49 @@ fn reverse_selection_contents(cx: &mut Context) {
 }
 
 // tree sitter node selection
+
+fn fold_toggle(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor(doc.text().slice(..));
+    if !doc.toggle_fold_at(view.id, cursor) {
+        cx.editor.set_error("no fold at cursor");
+    }
+}
+
+fn fold_open(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor(doc.text().slice(..));
+    if !doc.open_fold_at(view.id, cursor) {
+        cx.editor.set_error("no collapsed fold at cursor");
+    }
+}
+
+fn fold_close(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    let cursor = doc
+        .selection(view.id)
+        .primary()
+        .cursor(doc.text().slice(..));
+    if !doc.close_fold_at(view.id, cursor) {
+        cx.editor.set_error("no fold at cursor");
+    }
+}
+
+fn fold_open_all(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    doc.expand_all_folds(view.id);
+}
+
+fn fold_close_all(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    doc.collapse_all_folds(view.id);
+}
 
 fn expand_selection(cx: &mut Context) {
     let motion = |editor: &mut Editor| {

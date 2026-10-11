@@ -28,7 +28,7 @@ use tree_house::{
     Error, InjectionLanguageMarker, LanguageConfig as SyntaxConfig, Layer,
 };
 
-use crate::{indent::IndentQuery, tree_sitter, ChangeSet, Language};
+use crate::{folds::FoldRange, indent::IndentQuery, tree_sitter, ChangeSet, Language};
 
 pub use tree_house::{
     highlighter::{Highlight, HighlightEvent},
@@ -44,6 +44,7 @@ pub struct LanguageData {
     textobject_query: OnceLock<Option<TextObjectQuery>>,
     tag_query: OnceLock<Option<TagQuery>>,
     rainbow_query: OnceLock<Option<RainbowQuery>>,
+    fold_query: OnceLock<Option<FoldQuery>>,
 }
 
 impl LanguageData {
@@ -55,6 +56,7 @@ impl LanguageData {
             textobject_query: OnceLock::new(),
             tag_query: OnceLock::new(),
             rainbow_query: OnceLock::new(),
+            fold_query: OnceLock::new(),
         }
     }
 
@@ -222,6 +224,43 @@ impl LanguageData {
             .get_or_init(|| {
                 let grammar = self.syntax_config(loader)?.grammar;
                 Self::compile_rainbow_query(grammar, &self.config)
+                    .map_err(|err| {
+                        log::error!("{err}");
+                    })
+                    .ok()
+                    .flatten()
+            })
+            .as_ref()
+    }
+
+    /// Compiles the folds.scm query for a language.
+    /// This function should only be used by this module or the xtask crate.
+    pub fn compile_fold_query(
+        grammar: Grammar,
+        config: &LanguageConfiguration,
+    ) -> Result<Option<FoldQuery>> {
+        let name = &config.language_id;
+        let text = read_query(name, "folds.scm");
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let query = Query::new(grammar, &text, |_pattern, predicate| match predicate {
+            UserPredicate::Other(pred) => match pred.name() {
+                // `folds.scm` may use plain predicates like `#not-kind-eq?` in the future; accept
+                // unknown user predicates so a query that compiles upstream still loads here.
+                _ => Ok(()),
+            },
+            _ => Err(InvalidPredicateError::unknown(predicate)),
+        })
+        .with_context(|| format!("Failed to compile folds.scm query for '{name}'"))?;
+        Ok(Some(FoldQuery { query }))
+    }
+
+    fn fold_query(&self, loader: &Loader) -> Option<&FoldQuery> {
+        self.fold_query
+            .get_or_init(|| {
+                let grammar = self.syntax_config(loader)?.grammar;
+                Self::compile_fold_query(grammar, &self.config)
                     .map_err(|err| {
                         log::error!("{err}");
                     })
@@ -418,6 +457,10 @@ impl Loader {
 
     pub fn tag_query(&self, lang: Language) -> Option<&TagQuery> {
         self.language(lang).tag_query(self)
+    }
+
+    pub fn fold_query(&self, lang: Language) -> Option<&FoldQuery> {
+        self.language(lang).fold_query(self)
     }
 
     fn rainbow_query(&self, lang: Language) -> Option<&RainbowQuery> {
@@ -625,6 +668,47 @@ impl Syntax {
             |lang| loader.tag_query(lang).map(|q| &q.query),
             range,
         )
+    }
+
+    /// Compute the foldable (`@fold`) character ranges for the given document text.
+    ///
+    /// Only ranges that span more than one line are returned. The result is sorted
+    /// by start offset.
+    pub fn fold_ranges(&self, source: RopeSlice, loader: &Loader) -> Vec<FoldRange> {
+        let mut ranges = Vec::new();
+        let mut query_iter = self.query_iter::<_, (), _>(
+            source,
+            |lang| loader.fold_query(lang).map(|q| &q.query),
+            ..,
+        );
+
+        while let Some(event) = query_iter.next() {
+            let QueryIterEvent::Match(mat) = event else {
+                continue;
+            };
+            let Some(query) = loader
+                .fold_query(query_iter.current_language())
+                .map(|q| &q.query)
+            else {
+                continue;
+            };
+            let Some(fold_capture) = query.get_capture("fold") else {
+                continue;
+            };
+            if mat.capture != fold_capture {
+                continue;
+            }
+            let byte_range = mat.node.byte_range();
+            let start = source.byte_to_char(byte_range.start as usize);
+            let end = source.byte_to_char(byte_range.end as usize);
+            if start < end && source.char_to_line(start) < source.char_to_line(end) {
+                ranges.push(FoldRange::new(start, end));
+            }
+        }
+
+        ranges.sort_by_key(|range| (range.start, range.end));
+        ranges.dedup();
+        ranges
     }
 
     pub fn rainbow_highlights(
@@ -1071,6 +1155,12 @@ impl TextObjectQuery {
 
 #[derive(Debug)]
 pub struct TagQuery {
+    pub query: Query,
+}
+
+/// Query used to determine foldable (`@fold`) ranges for a language.
+#[derive(Debug)]
+pub struct FoldQuery {
     pub query: Query,
 }
 
