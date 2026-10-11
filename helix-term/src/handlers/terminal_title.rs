@@ -2,9 +2,10 @@ use std::path::Path;
 
 use helix_event::register_hook;
 use helix_view::{
+    Editor, View,
     editor::Config,
     events::{DocumentDidOpen, DocumentFocusLost},
-    Editor,
+    tree::Tree,
 };
 
 use crate::handlers::Handlers;
@@ -13,11 +14,22 @@ const APP_NAME: &str = "lx";
 const SCRATCH_SUMMARY: &str = "[scratch]";
 const ELLIPSIS: char = '…';
 
+/// Resolves the focused view of the tree, or `None` when the focused node is
+/// not a view.
+///
+/// The focus is not guaranteed to be a view: before the first view is created
+/// (e.g. while the initial document is being opened) it points at the root
+/// container, and it can briefly refer to a view that was just removed. Use
+/// [`Tree::try_get`] so those states resolve to `None` instead of panicking.
+fn focused_view(tree: &Tree) -> Option<&View> {
+    tree.try_get(tree.focus)
+}
+
 fn build_title(editor: &Editor, config: &Config) -> String {
     let sep = &config.terminal_title_separator;
 
     // The focused view may not be resolvable yet (e.g. while a document is being opened).
-    let Some(view) = editor.tree.try_get(editor.tree.focus) else {
+    let Some(view) = focused_view(&editor.tree) else {
         return APP_NAME.to_string();
     };
 
@@ -107,6 +119,25 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use helix_view::{DocumentId, editor::GutterConfig, graphics::Rect};
+
+    #[test]
+    fn focused_view_is_none_before_a_view_is_registered() {
+        // A fresh tree only holds the root container; its focus is therefore not a
+        // view. `build_title` runs in this exact state when the very first document
+        // is opened (the `DocumentDidOpen` hook fires before the view is created),
+        // so resolving the focus must not panic.
+        let tree = Tree::new(Rect::new(0, 0, 80, 24));
+        assert!(focused_view(&tree).is_none());
+    }
+
+    #[test]
+    fn focused_view_resolves_an_inserted_view() {
+        let mut tree = Tree::new(Rect::new(0, 0, 80, 24));
+        let view = View::new(DocumentId::default(), GutterConfig::default());
+        let id = tree.insert(view);
+        assert_eq!(focused_view(&tree).map(|view| view.id), Some(id));
+    }
 
     #[test]
     fn title_is_app_name_separator_and_name() {
