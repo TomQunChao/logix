@@ -265,6 +265,30 @@ fn entry_status(tree: &FileTree, name: &str) -> Option<GitStatus> {
         .and_then(|entry| entry.git_status)
 }
 
+/// Wait for `name` in the tree (rebuilt from the cache) to reach `expected`.
+///
+/// The changed-file status is computed synchronously when the tree is first built, but the
+/// (expensive) ignored set is computed in the background and merged into the cache afterwards.
+async fn wait_for_entry_status(
+    app: &Application,
+    root: &std::path::Path,
+    name: &str,
+    expected: GitStatus,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let tree = FileTree::new(root.to_path_buf(), &app.editor);
+        if entry_status(&tree, name) == Some(expected) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{name} never reached {expected:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// The file tree must color real files by their git status. Build a temporary
 /// repository, dirty its worktree and check that each entry carries the
 /// matching status (the colors themselves are resolved from those statuses).
@@ -291,6 +315,7 @@ async fn file_tree_entries_carry_git_status() -> anyhow::Result<()> {
     let app = AppBuilder::new().build()?;
     let tree = FileTree::new(root.clone(), &app.editor);
 
+    // These come from the cheap, synchronous scan.
     assert_eq!(entry_status(&tree, "committed.txt"), None);
     assert_eq!(
         entry_status(&tree, "modified.txt"),
@@ -300,7 +325,9 @@ async fn file_tree_entries_carry_git_status() -> anyhow::Result<()> {
         entry_status(&tree, "untracked.txt"),
         Some(GitStatus::Untracked)
     );
-    assert_eq!(entry_status(&tree, "ignored.txt"), Some(GitStatus::Ignored));
+
+    // Ignored files come from the background scan.
+    wait_for_entry_status(&app, &root, "ignored.txt", GitStatus::Ignored).await;
 
     Ok(())
 }
@@ -320,9 +347,11 @@ async fn file_tree_ignored_directory_children_inherit_status() -> anyhow::Result
     git(&root, &["commit", "-m", "initial"]);
 
     let app = AppBuilder::new().build()?;
-    let mut tree = FileTree::new(root.clone(), &app.editor);
 
-    // `target` is reported as ignored, so expanding it must dim its children too.
+    // `target` is reported as ignored by the background scan.
+    wait_for_entry_status(&app, &root, "target", GitStatus::Ignored).await;
+
+    let mut tree = FileTree::new(root.clone(), &app.editor);
     let target = tree
         .entries
         .iter()
@@ -330,6 +359,7 @@ async fn file_tree_ignored_directory_children_inherit_status() -> anyhow::Result
         .expect("target should be listed");
     assert_eq!(tree.entries[target].git_status, Some(GitStatus::Ignored));
 
+    // Expanding it must dim its children too.
     tree.toggle_expand(target);
     assert_eq!(
         entry_status(&tree, "artifact.bin"),

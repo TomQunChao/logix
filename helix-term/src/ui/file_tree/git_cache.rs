@@ -1,13 +1,10 @@
 //! In-process cache for git status, kept fresh by a filesystem watcher.
 //!
-//! Opening the file tree (`space+e`) runs a full `git status` scan, which is expensive on large
-//! repositories. The result is cached per workspace root and a [`notify`] watcher recomputes it
-//! in the background whenever the repository changes, so opening the tree is a cheap cache hit
-//! instead of a scan.
-//!
-//! Both the scan and the watcher setup happen outside the UI's critical path where possible: the
-//! watcher runs on its own thread and is only *asked* to watch a root, so opening the tree never
-//! blocks on registering filesystem watches.
+//! Opening the file tree (`space+e`) runs a `git status` scan. Two things make the full scan
+//! expensive on large repositories: enumerating *ignored* files makes gix walk into directories
+//! like `target/` (seconds), while the tracked/untracked scan is cheap. So the changed-file scan
+//! runs synchronously (fast) while the ignored set is computed on its own thread and merged into
+//! the cached result when ready. A [`notify`] watcher keeps the cache fresh afterwards.
 
 use std::{
     cell::RefCell,
@@ -20,6 +17,7 @@ use std::{
 
 use helix_vcs::{DiffProviderRegistry, FileChange};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::runtime::Handle;
 
 /// How long to wait for the filesystem to settle before recomputing git status. Editor saves and
 /// git operations emit bursts of events; waiting avoids recomputing once per event.
@@ -70,13 +68,20 @@ impl GitStatus {
 }
 
 /// The cached status of a single workspace root.
+///
+/// The two parts are kept apart: `changed` is recomputed on every filesystem change, while
+/// `ignored` is expensive to compute and only refreshed when ignore rules or directory structure
+/// change.
 struct Entry {
-    status: HashMap<PathBuf, GitStatus>,
-    trust_full: bool,
-    /// Ignored files/directories reported by the last scan. Events under these paths cannot
-    /// change the status, so they are filtered out to keep e.g. build output from triggering
-    /// scans (the watched tree includes ignored directories).
+    changed: HashMap<PathBuf, GitStatus>,
     ignored: Vec<PathBuf>,
+    /// `false` after [`invalidate`] so the next [`load`] recomputes `changed`.
+    status_valid: bool,
+    /// Whether the (expensive) ignored scan has completed at least once.
+    ignored_scanned: bool,
+    trust_full: bool,
+    /// The runtime this root was first loaded from; the ignored scan is dispatched to it.
+    handle: Option<Handle>,
 }
 
 #[derive(Default)]
@@ -87,6 +92,8 @@ struct Cache {
     /// Roots for which no watch could be set up. They are never cached: correctness beats speed
     /// when changes cannot be detected.
     unwatched: HashSet<PathBuf>,
+    /// Roots whose ignored scan is currently running on a background thread.
+    scanning: HashSet<PathBuf>,
     registry: Option<DiffProviderRegistry>,
 }
 
@@ -94,6 +101,8 @@ struct Cache {
 enum Msg {
     /// Register `root` with the OS watcher.
     Watch(PathBuf),
+    /// Compute the (expensive) ignored set for `root` on a background thread.
+    ScanIgnored(PathBuf),
     /// A filesystem event for `path`.
     Event(PathBuf),
 }
@@ -111,62 +120,91 @@ fn lock_cache() -> MutexGuard<'static, Cache> {
 
 /// Return the git status map for `root`, using the cache when possible.
 ///
-/// The first call for a root runs the scan synchronously (the unavoidable cost of the first
-/// open) and asks the watcher thread to watch the repository. Afterwards the watcher keeps the
-/// entry fresh in the background.
+/// The first call for a root runs the cheap changed-file scan synchronously and starts watching
+/// the repository; the ignored set is computed in the background and merged into later results.
 pub fn load(
     root: &Path,
     registry: &DiffProviderRegistry,
     trust_full: bool,
 ) -> HashMap<PathBuf, GitStatus> {
+    let mut unwatched = false;
     {
         let cache = lock_cache();
         if let Some(entry) = cache.entries.get(root) {
-            return entry.status.clone();
-        }
-        if cache.unwatched.contains(root) {
-            drop(cache);
-            return compute(root, registry, trust_full);
+            if entry.status_valid {
+                return combined(entry);
+            }
+        } else {
+            unwatched = cache.unwatched.contains(root);
         }
     }
+    if unwatched {
+        // No watcher: never serve a stale cached entry. Only the fast scan is affordable here.
+        return compute_changed(root, registry, trust_full);
+    }
 
-    // Scan without holding the lock; a scan can take a while on large repositories.
-    let status = compute(root, registry, trust_full);
+    let changed = compute_changed(root, registry, trust_full);
 
     // A watcher is required: without one the cached entry could never be invalidated. If the
     // worker thread could not be started, fall back to scanning on every call.
     let Some(watcher) = watcher_sender() else {
-        return status;
+        return changed;
     };
 
-    {
+    let need_scan = {
         let mut cache = lock_cache();
-        // Another thread may have populated the entry while we scanned.
-        if let Some(entry) = cache.entries.get(root) {
-            return entry.status.clone();
+        match cache.entries.get_mut(root) {
+            Some(entry) => {
+                entry.changed = changed;
+                entry.status_valid = true;
+                !entry.ignored_scanned
+            }
+            None => {
+                cache.registry = Some(registry.clone());
+                cache.entries.insert(
+                    root.to_path_buf(),
+                    Entry {
+                        changed,
+                        ignored: Vec::new(),
+                        status_valid: true,
+                        ignored_scanned: false,
+                        trust_full,
+                        handle: Handle::try_current().ok(),
+                    },
+                );
+                true
+            }
         }
-        cache.registry = Some(registry.clone());
-        cache.entries.insert(
-            root.to_path_buf(),
-            Entry {
-                ignored: ignored_roots(&status),
-                status: status.clone(),
-                trust_full,
-            },
-        );
+    };
+
+    let _ = watcher.send(Msg::Watch(root.to_path_buf()));
+    if need_scan {
+        let _ = watcher.send(Msg::ScanIgnored(root.to_path_buf()));
     }
 
-    // Ask the watcher thread to watch the root. This is non-blocking; if registration fails the
-    // worker drops the entry and disables caching for the root.
-    let _ = watcher.send(Msg::Watch(root.to_path_buf()));
-    status
+    lock_cache()
+        .entries
+        .get(root)
+        .map(combined)
+        .unwrap_or_default()
 }
 
-/// Drop the cached status for `root`, forcing the next [`load`] to rescan. Used after file
-/// operations performed in the editor so the tree reflects them immediately instead of waiting
-/// for the watcher's debounce. The watch itself is kept.
+/// Drop the cached *changed* status for `root`, forcing the next [`load`] to rescan it. Used after
+/// file operations performed in the editor so the tree reflects them immediately instead of
+/// waiting for the watcher's debounce. The (expensive) ignored set is kept.
 pub fn invalidate(root: &Path) {
-    lock_cache().entries.remove(root);
+    if let Some(entry) = lock_cache().entries.get_mut(root) {
+        entry.status_valid = false;
+    }
+}
+
+/// The changed-file status map plus the ignored entries reported so far.
+fn combined(entry: &Entry) -> HashMap<PathBuf, GitStatus> {
+    let mut map = entry.changed.clone();
+    for path in &entry.ignored {
+        map.insert(path.clone(), GitStatus::Ignored);
+    }
+    map
 }
 
 /// The command sender to the watcher worker, starting the thread on first use. `None` if the
@@ -192,15 +230,15 @@ fn watcher_sender() -> Option<&'static mpsc::Sender<Msg>> {
         .as_ref()
 }
 
-/// Run a full `git status`-style scan for `root`, including ignored files.
-fn compute(
+/// The cheap scan: tracked/untracked/conflict changes, without enumerating ignored files.
+fn compute_changed(
     root: &Path,
     registry: &DiffProviderRegistry,
     trust_full: bool,
 ) -> HashMap<PathBuf, GitStatus> {
     // The provider callback must be `Fn`, so collect through interior mutability.
     let status = RefCell::new(HashMap::new());
-    registry.for_each_changed_file_sync(root, trust_full, true, |change| {
+    registry.for_each_changed_file_sync(root, trust_full, false, |change| {
         if let Ok(change) = change {
             status
                 .borrow_mut()
@@ -211,16 +249,21 @@ fn compute(
     status.into_inner()
 }
 
-/// The ignored paths reported by a scan.
-fn ignored_roots(status: &HashMap<PathBuf, GitStatus>) -> Vec<PathBuf> {
-    status
-        .iter()
-        .filter(|(_, status)| **status == GitStatus::Ignored)
-        .map(|(path, _)| path.clone())
-        .collect()
+/// The expensive scan: the paths reported as ignored by git.
+fn compute_ignored(root: &Path, registry: &DiffProviderRegistry, trust_full: bool) -> Vec<PathBuf> {
+    let ignored = RefCell::new(Vec::new());
+    registry.for_each_changed_file_sync(root, trust_full, true, |change| {
+        if let Ok(change) = change {
+            if matches!(change, FileChange::Ignored { .. }) {
+                ignored.borrow_mut().push(change.path().to_path_buf());
+            }
+        }
+        true
+    });
+    ignored.into_inner()
 }
 
-/// Whether `path` is inside a path that the last scan reported as ignored.
+/// Whether `path` is inside a path that the ignored scan reported as ignored.
 fn is_ignored(entry: &Entry, path: &Path) -> bool {
     entry
         .ignored
@@ -238,6 +281,7 @@ fn worker(cache: Arc<Mutex<Cache>>, rx: mpsc::Receiver<Msg>, event_tx: mpsc::Sen
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Watch(root) => install_watch(&cache, &mut watcher, &event_tx, root),
+            Msg::ScanIgnored(root) => start_ignored_scan(&cache, root),
             Msg::Event(first) => {
                 let mut dirty: HashSet<PathBuf> = HashSet::new();
                 dirty.insert(first);
@@ -256,12 +300,14 @@ fn worker(cache: Arc<Mutex<Cache>>, rx: mpsc::Receiver<Msg>, event_tx: mpsc::Sen
                         Ok(Msg::Watch(root)) => {
                             install_watch(&cache, &mut watcher, &event_tx, root)
                         }
+                        Ok(Msg::ScanIgnored(root)) => start_ignored_scan(&cache, root),
                         Err(mpsc::RecvTimeoutError::Timeout) => break,
                         Err(mpsc::RecvTimeoutError::Disconnected) => return,
                     }
                 }
 
-                refresh(&cache, &dirty);
+                refresh_changed(&cache, &dirty);
+                maybe_rescan_ignored(&cache, &dirty);
             }
         }
     }
@@ -337,9 +383,122 @@ fn disable(cache: &Arc<Mutex<Cache>>, root: &Path, reason: String) {
     cache.entries.remove(root);
 }
 
-/// Recompute every cached root that the changed `paths` touch, ignoring changes that can only be
-/// under ignored paths.
-fn refresh(cache: &Arc<Mutex<Cache>>, paths: &HashSet<PathBuf>) {
+/// Kick off the ignored scan for `root` on the tokio blocking pool.
+///
+/// Running on the blocking pool (rather than a bare thread) lets the scan hand its result back to
+/// the UI through the job queue, which needs a runtime context.
+fn start_ignored_scan(cache: &Arc<Mutex<Cache>>, root: PathBuf) {
+    let (registry, trust_full, handle) = {
+        let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(entry) = cache.entries.get(&root) else {
+            return;
+        };
+        let trust_full = entry.trust_full;
+        let handle = entry.handle.clone();
+        let Some(registry) = cache.registry.clone() else {
+            return;
+        };
+        if !cache.scanning.insert(root.clone()) {
+            // A scan is already running for this root.
+            return;
+        }
+        (registry, trust_full, handle)
+    };
+
+    let cache = cache.clone();
+    let scan_root = root.clone();
+    let dispatch_handle = handle.clone();
+    let run = move || {
+        let ignored = compute_ignored(&scan_root, &registry, trust_full);
+        {
+            let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+            cache.scanning.remove(&scan_root);
+            let Some(entry) = cache.entries.get_mut(&scan_root) else {
+                return;
+            };
+            entry.ignored = ignored;
+            entry.ignored_scanned = true;
+        }
+
+        // Re-apply the status to an open tree, so ignored entries get dimmed without reopening.
+        // `dispatch` needs a runtime context, which the blocking pool provides.
+        if let Some(handle) = dispatch_handle {
+            handle.spawn(async move {
+                crate::job::dispatch(|editor, compositor| {
+                    if let Some(editor_view) = compositor.find::<crate::ui::EditorView>() {
+                        if let Some(tree) = editor_view.sidebar.as_mut() {
+                            tree.reload_git_status(editor);
+                        }
+                    }
+                })
+                .await;
+            });
+        }
+    };
+
+    // Without a runtime (e.g. unit tests) the cache is still updated, just without a UI redraw.
+    match handle {
+        Some(handle) => {
+            handle.spawn_blocking(run);
+        }
+        None => {
+            let _ = thread::Builder::new()
+                .name("git-status-ignored".to_owned())
+                .spawn(run);
+        }
+    }
+}
+
+/// Whether a change to `path` may have changed the ignored set (a new directory or ignore rule).
+fn should_rescan_ignored(entry: &Entry, root: &Path, path: &Path) -> bool {
+    // Changes inside already-ignored paths cannot change the ignored set.
+    if is_ignored(entry, path) {
+        return false;
+    }
+    if path.file_name().is_some_and(|name| name == ".gitignore") {
+        return true;
+    }
+    if path == root.join(".git").join("info").join("exclude") {
+        return true;
+    }
+    // A directory appearing or disappearing at the top level (e.g. `target/`) can introduce a new
+    // ignored subtree. `.git` churns constantly, so it is excluded.
+    !path.starts_with(root.join(".git")) && path.is_dir() && path.parent() == Some(root)
+}
+
+/// Rescan the ignored set for roots whose changed paths might affect it.
+fn maybe_rescan_ignored(cache: &Arc<Mutex<Cache>>, paths: &HashSet<PathBuf>) {
+    let roots: Vec<PathBuf> = {
+        let cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+        cache
+            .entries
+            .iter()
+            .filter(|(root, entry)| {
+                paths
+                    .iter()
+                    .any(|path| path.starts_with(root) && should_rescan_ignored(entry, root, path))
+            })
+            .map(|(root, _)| root.clone())
+            .collect()
+    };
+
+    for root in roots {
+        // Allow `load` to schedule a scan again and start one now.
+        if let Some(entry) = cache
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .entries
+            .get_mut(&root)
+        {
+            entry.ignored_scanned = false;
+        }
+        start_ignored_scan(cache, root);
+    }
+}
+
+/// Recompute the (cheap) changed-file status for every cached root the changed `paths` touch,
+/// ignoring changes that can only be under ignored paths.
+fn refresh_changed(cache: &Arc<Mutex<Cache>>, paths: &HashSet<PathBuf>) {
     // Snapshot the targets under the lock, but scan without holding it.
     let targets: Vec<(PathBuf, DiffProviderRegistry, bool)> = {
         let cache = cache.lock().unwrap_or_else(|err| err.into_inner());
@@ -359,11 +518,11 @@ fn refresh(cache: &Arc<Mutex<Cache>>, paths: &HashSet<PathBuf>) {
     };
 
     for (root, registry, trust_full) in targets {
-        let status = compute(&root, &registry, trust_full);
+        let changed = compute_changed(&root, &registry, trust_full);
         let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
         if let Some(entry) = cache.entries.get_mut(&root) {
-            entry.ignored = ignored_roots(&status);
-            entry.status = status;
+            entry.changed = changed;
+            entry.status_valid = true;
         }
     }
 }
@@ -371,6 +530,17 @@ fn refresh(cache: &Arc<Mutex<Cache>>, paths: &HashSet<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(changed: HashMap<PathBuf, GitStatus>, ignored: Vec<PathBuf>) -> Entry {
+        Entry {
+            changed,
+            ignored,
+            status_valid: true,
+            ignored_scanned: true,
+            trust_full: true,
+            handle: None,
+        }
+    }
 
     #[test]
     fn git_status_maps_from_file_change() {
@@ -409,22 +579,22 @@ mod tests {
     }
 
     #[test]
-    fn ignored_roots_lists_only_ignored_paths() {
-        let mut status = HashMap::new();
-        status.insert(PathBuf::from("/root/target"), GitStatus::Ignored);
-        status.insert(PathBuf::from("/root/src/main.rs"), GitStatus::Modified);
-
-        let ignored = ignored_roots(&status);
-        assert_eq!(ignored, vec![PathBuf::from("/root/target")]);
+    fn combined_merges_changed_and_ignored() {
+        let entry = entry(
+            HashMap::from([(PathBuf::from("/root/a"), GitStatus::Modified)]),
+            vec![PathBuf::from("/root/target")],
+        );
+        let map = combined(&entry);
+        assert_eq!(map.get(Path::new("/root/a")), Some(&GitStatus::Modified));
+        assert_eq!(
+            map.get(Path::new("/root/target")),
+            Some(&GitStatus::Ignored)
+        );
     }
 
     #[test]
     fn events_under_ignored_paths_are_filtered_out() {
-        let entry = Entry {
-            status: HashMap::new(),
-            trust_full: true,
-            ignored: vec![PathBuf::from("/root/target")],
-        };
+        let entry = entry(HashMap::new(), vec![PathBuf::from("/root/target")]);
         assert!(is_ignored(
             &entry,
             &PathBuf::from("/root/target/debug/build.o")
@@ -433,20 +603,40 @@ mod tests {
     }
 
     #[test]
+    fn directory_and_ignore_file_changes_trigger_a_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("newdir")).unwrap();
+        let entry = entry(HashMap::new(), vec![root.join("target")]);
+        assert!(should_rescan_ignored(&entry, root, &root.join("newdir")));
+        assert!(should_rescan_ignored(
+            &entry,
+            root,
+            &root.join(".gitignore")
+        ));
+        assert!(!should_rescan_ignored(
+            &entry,
+            root,
+            &root.join("target/debug/x")
+        ));
+        // `.git` churn must not trigger rescans.
+        assert!(!should_rescan_ignored(
+            &entry,
+            root,
+            &root.join(".git/index")
+        ));
+        assert!(!should_rescan_ignored(&entry, root, &root.join(".git")));
+    }
+
+    #[test]
     fn load_returns_cached_entry_without_scanning() {
         // A root that does not exist: a real scan would find nothing (and never a `Modified`
         // file), so returning the cached status proves the cache path is taken.
         let root = PathBuf::from("/helix/nonexistent/root");
-        let mut status = HashMap::new();
-        status.insert(root.join("file.txt"), GitStatus::Modified);
-        lock_cache().entries.insert(
-            root.clone(),
-            Entry {
-                status,
-                trust_full: true,
-                ignored: Vec::new(),
-            },
-        );
+        let changed = HashMap::from([(root.join("file.txt"), GitStatus::Modified)]);
+        lock_cache()
+            .entries
+            .insert(root.clone(), entry(changed, Vec::new()));
 
         let registry = DiffProviderRegistry::default();
         let loaded = load(&root, &registry, true);
@@ -456,6 +646,11 @@ mod tests {
         );
 
         invalidate(&root);
-        assert!(lock_cache().entries.get(&root).is_none());
+        let cache = lock_cache();
+        let entry = cache
+            .entries
+            .get(&root)
+            .expect("entry is kept, only invalidated");
+        assert!(!entry.status_valid);
     }
 }

@@ -153,6 +153,24 @@ fn git_status_style(theme: &helix_view::Theme, status: GitStatus) -> Style {
         .unwrap_or_default()
 }
 
+/// The git status for `path`, inheriting `Ignored` from an ignored ancestor directory.
+///
+/// Git reports a whole ignored directory as a single entry, so its children are not in the
+/// status map; they inherit the ignored status here instead.
+fn lookup_git_status(status: &HashMap<PathBuf, GitStatus>, path: &Path) -> Option<GitStatus> {
+    if let Some(status) = status.get(path).copied() {
+        return Some(status);
+    }
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        if status.get(dir).copied() == Some(GitStatus::Ignored) {
+            return Some(GitStatus::Ignored);
+        }
+        ancestor = dir.parent();
+    }
+    None
+}
+
 /// Whether `path`'s file name starts with a dot (a hidden file).
 fn is_hidden(path: &Path) -> bool {
     path.file_name()
@@ -405,21 +423,8 @@ impl FileTree {
     }
 
     /// The git status for `path`, inheriting `Ignored` from an ignored ancestor directory.
-    ///
-    /// Git reports a whole ignored directory as a single entry, so its children are not in the
-    /// status map; they inherit the ignored status here instead.
     fn git_status_for(&self, path: &Path) -> Option<GitStatus> {
-        if let Some(status) = self.git_status.get(path).copied() {
-            return Some(status);
-        }
-        let mut ancestor = path.parent();
-        while let Some(dir) = ancestor {
-            if self.git_status.get(dir).copied() == Some(GitStatus::Ignored) {
-                return Some(GitStatus::Ignored);
-            }
-            ancestor = dir.parent();
-        }
-        None
+        lookup_git_status(&self.git_status, path)
     }
 
     /// Load directory contents at the given path and depth
@@ -493,6 +498,18 @@ impl FileTree {
             .is_trusted();
 
         self.git_status = git_cache::load(&root, &editor.diff_providers, trust_full);
+    }
+
+    /// Re-read the cached git status and re-apply it to the already-listed entries.
+    ///
+    /// The ignored set is computed in the background and the watcher refreshes statuses on its
+    /// own; this is called when either updates the cache, so the tree reflects it without being
+    /// rebuilt from scratch.
+    pub fn reload_git_status(&mut self, editor: &Editor) {
+        self.load_git_status(editor);
+        for entry in &mut self.entries {
+            entry.git_status = lookup_git_status(&self.git_status, &entry.path);
+        }
     }
 
     /// Refresh the file tree, preserving the browsing position (expanded
