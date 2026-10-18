@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 use tui::{
     buffer::Buffer as Surface,
@@ -141,9 +141,26 @@ fn file_icon(name: &str) -> &'static str {
     }
 }
 
-/// Theme key used to color an entry by its git status. Reusing Helix's diff keys keeps the
-/// colors in sync with the active theme instead of hard-coding them.
+/// Theme key used to color an entry by its git status.
+///
+/// Each status has its own scope under `ui.file-tree.git.*` so themes can give them distinct
+/// colors and customize them independently from diffs. Themes that predate these scopes keep
+/// working through [`git_status_fallback_theme_key`], which reuses Helix's diff keys.
 fn git_status_theme_key(status: GitStatus) -> &'static str {
+    match status {
+        GitStatus::Untracked => "ui.file-tree.git.untracked",
+        GitStatus::Added => "ui.file-tree.git.added",
+        GitStatus::Ignored => "ui.file-tree.git.ignored",
+        GitStatus::Modified => "ui.file-tree.git.modified",
+        GitStatus::Renamed => "ui.file-tree.git.renamed",
+        GitStatus::Deleted => "ui.file-tree.git.deleted",
+        GitStatus::Conflict => "ui.file-tree.git.conflict",
+    }
+}
+
+/// Fallback scopes for themes that do not define the `ui.file-tree.git.*` scopes above. Reusing
+/// Helix's diff keys keeps the colors in sync with the active theme instead of hard-coding them.
+fn git_status_fallback_theme_key(status: GitStatus) -> &'static str {
     match status {
         GitStatus::Untracked | GitStatus::Added => "diff.plus",
         GitStatus::Ignored => "ui.text.inactive",
@@ -155,7 +172,10 @@ fn git_status_theme_key(status: GitStatus) -> &'static str {
 }
 
 fn git_status_style(theme: &helix_view::Theme, status: GitStatus) -> Style {
-    theme.get(git_status_theme_key(status))
+    theme
+        .try_get(git_status_theme_key(status))
+        .or_else(|| theme.try_get(git_status_fallback_theme_key(status)))
+        .unwrap_or_default()
 }
 
 /// Whether `path`'s file name starts with a dot (a hidden file).
@@ -359,8 +379,8 @@ impl FileTree {
             marked: BTreeSet::new(),
             anchor: None,
         };
-        tree.load_directory(&tree.root.clone(), 0);
         tree.load_git_status(editor);
+        tree.load_directory(&tree.root.clone(), 0);
         tree
     }
 
@@ -481,11 +501,13 @@ impl FileTree {
         }
     }
 
-    /// Load git status for all files in the workspace
+    /// Load git status for all files in the workspace.
+    ///
+    /// The scan runs synchronously, unlike the changed-file picker which streams results from a
+    /// background task. The tree needs the complete status map before it stamps its entries,
+    /// because a file's status is also inherited by the children of an ignored directory.
     fn load_git_status(&mut self, editor: &Editor) {
-        // Use the diff_providers to get changed files
         let root = self.root.clone();
-        let git_status = Arc::new(Mutex::new(HashMap::new()));
 
         let trust_full = editor
             .workspace_trust
@@ -495,37 +517,34 @@ impl FileTree {
             )
             .is_trusted();
 
-        let git_status_clone = git_status.clone();
-        editor
-            .diff_providers
-            .clone()
+        // The callback must be `Fn`, so collect through a lock rather than a captured `HashMap`.
+        let git_status = Mutex::new(HashMap::new());
+        editor.diff_providers.for_each_changed_file_sync(
+            &root,
+            trust_full,
             // The tree also wants ignored files (shown dimmed), unlike the changed-file picker.
-            .for_each_changed_file(root, trust_full, true, move |change| {
+            true,
+            |change| {
                 use helix_vcs::FileChange;
-                match change {
-                    Ok(change) => {
-                        let status = match change {
-                            FileChange::Untracked { .. } => GitStatus::Untracked,
-                            FileChange::Added { .. } => GitStatus::Added,
-                            FileChange::Ignored { .. } => GitStatus::Ignored,
-                            FileChange::Modified { .. } => GitStatus::Modified,
-                            FileChange::Conflict { .. } => GitStatus::Conflict,
-                            FileChange::Deleted { .. } => GitStatus::Deleted,
-                            FileChange::Renamed { .. } => GitStatus::Renamed,
-                        };
-                        if let Ok(mut map) = git_status_clone.lock() {
-                            map.insert(change.path().to_path_buf(), status);
-                        }
+                if let Ok(change) = change {
+                    let status = match change {
+                        FileChange::Untracked { .. } => GitStatus::Untracked,
+                        FileChange::Added { .. } => GitStatus::Added,
+                        FileChange::Ignored { .. } => GitStatus::Ignored,
+                        FileChange::Modified { .. } => GitStatus::Modified,
+                        FileChange::Conflict { .. } => GitStatus::Conflict,
+                        FileChange::Deleted { .. } => GitStatus::Deleted,
+                        FileChange::Renamed { .. } => GitStatus::Renamed,
+                    };
+                    if let Ok(mut map) = git_status.lock() {
+                        map.insert(change.path().to_path_buf(), status);
                     }
-                    Err(_) => return false,
                 }
                 true
-            });
+            },
+        );
 
-        // Collect the results
-        if let Ok(map) = git_status.lock() {
-            self.git_status = map.clone();
-        };
+        self.git_status = git_status.into_inner().unwrap_or_default();
     }
 
     /// Refresh the file tree, preserving the browsing position (expanded
@@ -535,8 +554,8 @@ impl FileTree {
         let state = self.state();
         self.entries.clear();
         self.git_status.clear();
-        self.load_directory(&self.root.clone(), 0);
         self.load_git_status(editor);
+        self.load_directory(&self.root.clone(), 0);
         self.restore_state(&state);
         if self.selected >= self.entries.len() {
             self.selected = self.entries.len().saturating_sub(1);
@@ -1755,14 +1774,130 @@ mod tests {
     // ── git status colors ───────────────────────────────────────────
 
     #[test]
-    fn git_statuses_map_to_theme_keys() {
-        assert_eq!(git_status_theme_key(GitStatus::Untracked), "diff.plus");
-        assert_eq!(git_status_theme_key(GitStatus::Added), "diff.plus");
-        assert_eq!(git_status_theme_key(GitStatus::Ignored), "ui.text.inactive");
-        assert_eq!(git_status_theme_key(GitStatus::Modified), "diff.delta");
-        assert_eq!(git_status_theme_key(GitStatus::Renamed), "diff.delta.moved");
-        assert_eq!(git_status_theme_key(GitStatus::Deleted), "diff.minus");
-        assert_eq!(git_status_theme_key(GitStatus::Conflict), "error");
+    fn git_statuses_map_to_dedicated_theme_keys() {
+        assert_eq!(
+            git_status_theme_key(GitStatus::Untracked),
+            "ui.file-tree.git.untracked"
+        );
+        assert_eq!(
+            git_status_theme_key(GitStatus::Added),
+            "ui.file-tree.git.added"
+        );
+        assert_eq!(
+            git_status_theme_key(GitStatus::Ignored),
+            "ui.file-tree.git.ignored"
+        );
+        assert_eq!(
+            git_status_theme_key(GitStatus::Modified),
+            "ui.file-tree.git.modified"
+        );
+        assert_eq!(
+            git_status_theme_key(GitStatus::Renamed),
+            "ui.file-tree.git.renamed"
+        );
+        assert_eq!(
+            git_status_theme_key(GitStatus::Deleted),
+            "ui.file-tree.git.deleted"
+        );
+        assert_eq!(
+            git_status_theme_key(GitStatus::Conflict),
+            "ui.file-tree.git.conflict"
+        );
+    }
+
+    #[test]
+    fn git_statuses_fall_back_to_diff_keys() {
+        assert_eq!(
+            git_status_fallback_theme_key(GitStatus::Untracked),
+            "diff.plus"
+        );
+        assert_eq!(git_status_fallback_theme_key(GitStatus::Added), "diff.plus");
+        assert_eq!(
+            git_status_fallback_theme_key(GitStatus::Ignored),
+            "ui.text.inactive"
+        );
+        assert_eq!(
+            git_status_fallback_theme_key(GitStatus::Modified),
+            "diff.delta"
+        );
+        assert_eq!(
+            git_status_fallback_theme_key(GitStatus::Renamed),
+            "diff.delta.moved"
+        );
+        assert_eq!(
+            git_status_fallback_theme_key(GitStatus::Deleted),
+            "diff.minus"
+        );
+        assert_eq!(git_status_fallback_theme_key(GitStatus::Conflict), "error");
+    }
+
+    #[test]
+    fn every_git_status_has_a_distinct_theme_key() {
+        let statuses = [
+            GitStatus::Untracked,
+            GitStatus::Added,
+            GitStatus::Ignored,
+            GitStatus::Modified,
+            GitStatus::Renamed,
+            GitStatus::Deleted,
+            GitStatus::Conflict,
+        ];
+        let keys: std::collections::HashSet<_> =
+            statuses.iter().map(|s| git_status_theme_key(*s)).collect();
+        assert_eq!(keys.len(), statuses.len());
+    }
+
+    #[test]
+    fn default_theme_gives_every_git_status_a_distinct_color() {
+        let theme = &helix_view::theme::DEFAULT_THEME;
+        let statuses = [
+            GitStatus::Untracked,
+            GitStatus::Added,
+            GitStatus::Ignored,
+            GitStatus::Modified,
+            GitStatus::Renamed,
+            GitStatus::Deleted,
+            GitStatus::Conflict,
+        ];
+
+        // Every status must resolve to a color defined by the theme (not the empty fallback)...
+        let styles: Vec<Style> = statuses
+            .iter()
+            .map(|status| git_status_style(theme, *status))
+            .collect();
+        assert!(
+            styles.iter().all(|style| *style != Style::default()),
+            "every git status should be colored by the default theme"
+        );
+
+        // ...and no two statuses may share the same color.
+        for (i, style) in styles.iter().enumerate() {
+            for other in &styles[i + 1..] {
+                assert_ne!(style, other, "git statuses must not share a theme color");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_theme_falls_back_to_diff_colors() {
+        // A theme that defines neither the file-tree scopes nor the diff keys yields nothing...
+        let empty = helix_view::Theme::default();
+        assert_eq!(
+            git_status_style(&empty, GitStatus::Modified),
+            Style::default()
+        );
+
+        // ...while one that only defines `diff.delta` still colors modified files.
+        let theme: helix_view::Theme =
+            toml::from_str(r#""diff.delta" = "yellow""#).expect("theme should parse");
+        assert_eq!(
+            git_status_style(&theme, GitStatus::Modified),
+            theme.get("diff.delta")
+        );
+        assert_ne!(
+            git_status_style(&theme, GitStatus::Modified),
+            Style::default()
+        );
     }
 
     #[test]

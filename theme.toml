@@ -41,6 +41,16 @@ tabstop = { modifiers = ["italic"], bg = "bossanova" }
 "diff.minus" = "#f22c86"
 "diff.delta" = "#6f44f0"
 
+# Git status colors for files in the file tree sidebar (`space+e`). Each status can be themed
+# independently; themes that don't define these fall back to the diff keys above.
+"ui.file-tree.git.untracked" = "mint"
+"ui.file-tree.git.added" = "#35bf86"
+"ui.file-tree.git.modified" = "honey"
+"ui.file-tree.git.renamed" = "delta"
+"ui.file-tree.git.deleted" = "#f22c86"
+"ui.file-tree.git.conflict" = "apricot"
+"ui.file-tree.git.ignored" = "sirocco"
+
 # TODO: differentiate doc comment
 # concat (ERROR) @error.syntax and "MISSING ;" selectors for errors
 

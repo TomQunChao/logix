@@ -47,6 +47,15 @@
 "diff.delta" = "yellow"
 "diff.minus" = "red"
 
+# Git status colors for files in the file tree sidebar (`space+e`).
+"ui.file-tree.git.untracked" = "cyan"
+"ui.file-tree.git.added" = "green"
+"ui.file-tree.git.modified" = "yellow"
+"ui.file-tree.git.renamed" = "blue"
+"ui.file-tree.git.deleted" = "red"
+"ui.file-tree.git.conflict" = "magenta"
+"ui.file-tree.git.ignored" = "gray"
+
 "diagnostic" = { modifiers = ["underlined"] }
 "ui.gutter" = { bg = "black" }
 "info" = "blue"

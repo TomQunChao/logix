@@ -105,6 +105,33 @@ impl DiffProviderRegistry {
             }
         });
     }
+
+    /// Synchronously iterate changed files, blocking until the scan finishes.
+    ///
+    /// Unlike [`Self::for_each_changed_file`], which runs in a background task and returns
+    /// immediately, callers are guaranteed to have seen every change by the time this returns.
+    /// The file tree uses it because it needs the complete status map *before* it stamps its
+    /// entries (children of ignored directories inherit their ancestor's status).
+    pub fn for_each_changed_file_sync(
+        &self,
+        cwd: &Path,
+        trust_full: bool,
+        include_ignored: bool,
+        f: impl Fn(Result<FileChange>) -> bool,
+    ) {
+        if self
+            .providers
+            .iter()
+            .find_map(|provider| {
+                provider
+                    .for_each_changed_file(cwd, trust_full, include_ignored, &f)
+                    .ok()
+            })
+            .is_none()
+        {
+            f(Err(anyhow!("no diff provider returns success")));
+        }
+    }
 }
 
 impl Default for DiffProviderRegistry {

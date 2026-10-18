@@ -1,4 +1,7 @@
-use helix_term::{application::Application, ui::EditorView};
+use helix_term::{
+    application::Application,
+    ui::{EditorView, FileTree, GitStatus},
+};
 use helix_view::editor::{FileTreeOpenBehavior, FileTreeOpenTarget};
 
 use super::*;
@@ -250,6 +253,88 @@ async fn file_tree_collapse_all() -> anyhow::Result<()> {
         false,
     )
     .await?;
+
+    Ok(())
+}
+
+/// The git status the file tree attached to the entry with the given file name.
+fn entry_status(tree: &FileTree, name: &str) -> Option<GitStatus> {
+    tree.entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .and_then(|entry| entry.git_status)
+}
+
+/// The file tree must color real files by their git status. Build a temporary
+/// repository, dirty its worktree and check that each entry carries the
+/// matching status (the colors themselves are resolved from those statuses).
+#[tokio::test(flavor = "multi_thread")]
+async fn file_tree_entries_carry_git_status() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    // Canonicalize so the tree's `read_dir` paths match the paths git reports (on macOS the
+    // temp directory is reached through a symlink, `/var` -> `/private/var`).
+    let root = dir.path().canonicalize()?;
+    init_git_repo(&root);
+
+    // A committed baseline on which to build the statuses below.
+    std::fs::write(root.join("committed.txt"), "one\n")?;
+    std::fs::write(root.join("modified.txt"), "one\n")?;
+    std::fs::write(root.join(".gitignore"), "ignored.txt\n")?;
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "initial"]);
+
+    // Dirty the worktree: one modified, one untracked and one ignored file.
+    std::fs::write(root.join("modified.txt"), "two\n")?;
+    std::fs::write(root.join("untracked.txt"), "new\n")?;
+    std::fs::write(root.join("ignored.txt"), "secret\n")?;
+
+    let app = AppBuilder::new().build()?;
+    let tree = FileTree::new(root.clone(), &app.editor);
+
+    assert_eq!(entry_status(&tree, "committed.txt"), None);
+    assert_eq!(
+        entry_status(&tree, "modified.txt"),
+        Some(GitStatus::Modified)
+    );
+    assert_eq!(
+        entry_status(&tree, "untracked.txt"),
+        Some(GitStatus::Untracked)
+    );
+    assert_eq!(entry_status(&tree, "ignored.txt"), Some(GitStatus::Ignored));
+
+    Ok(())
+}
+
+/// Ignored directories are reported as a single entry by git; their children
+/// must inherit the ignored status so the whole subtree is dimmed.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_tree_ignored_directory_children_inherit_status() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    init_git_repo(&root);
+
+    std::fs::write(root.join(".gitignore"), "target/\n")?;
+    std::fs::create_dir(root.join("target"))?;
+    std::fs::write(root.join("target/artifact.bin"), "x\n")?;
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "initial"]);
+
+    let app = AppBuilder::new().build()?;
+    let mut tree = FileTree::new(root.clone(), &app.editor);
+
+    // `target` is reported as ignored, so expanding it must dim its children too.
+    let target = tree
+        .entries
+        .iter()
+        .position(|entry| entry.name == "target")
+        .expect("target should be listed");
+    assert_eq!(tree.entries[target].git_status, Some(GitStatus::Ignored));
+
+    tree.toggle_expand(target);
+    assert_eq!(
+        entry_status(&tree, "artifact.bin"),
+        Some(GitStatus::Ignored)
+    );
 
     Ok(())
 }

@@ -347,6 +347,13 @@ These scopes are used for theming the editor interface:
 | `ui.text.info`                    | The key: command text in `ui.popup.info` boxes                                                 |
 | `ui.text.directory`               | Directory names in prompt completion                                                           |
 | `ui.text.symlink`                 | Symlink names in prompt completion                                                             |
+| `ui.file-tree.git.untracked`      | Untracked files in the file tree sidebar (`space+e`)                                           |
+| `ui.file-tree.git.added`          | Added (staged) files in the file tree                                                          |
+| `ui.file-tree.git.modified`       | Modified files in the file tree                                                                |
+| `ui.file-tree.git.renamed`        | Renamed files in the file tree                                                                 |
+| `ui.file-tree.git.deleted`        | Deleted files in the file tree                                                                 |
+| `ui.file-tree.git.conflict`       | Files with merge conflicts in the file tree                                                    |
+| `ui.file-tree.git.ignored`        | Git-ignored files in the file tree                                                             |
 | `ui.virtual.ruler`                | Ruler columns (see the [`editor.rulers` config][editor-section])                               |
 | `ui.virtual.whitespace`           | Visible whitespace characters                                                                  |
 | `ui.virtual.indent-guide`         | Vertical indent width guides                                                                   |
