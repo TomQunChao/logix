@@ -51,7 +51,8 @@ Code-like professional IDE while keeping the modal editing model.
 ## Implemented in this fork
 
 - File tree sidebar (`space+e`) with per-type icons, git status colors and
-  hidden/ignored toggles.
+  hidden/ignored toggles. Git status is cached in-process and kept fresh by a
+  filesystem watcher, so reopening the tree does not rescan the repository.
 - Session save/restore.
 - Bufferline shown by default.
 - Soft-wrap enabled by default; default theme `base16_transparent`.

@@ -338,3 +338,42 @@ async fn file_tree_ignored_directory_children_inherit_status() -> anyhow::Result
 
     Ok(())
 }
+
+/// The git status map is cached per workspace root and refreshed in the background by a
+/// filesystem watcher, so an external repository change shows up without reopening rescanning
+/// from scratch.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_tree_git_status_cache_refreshes_on_repository_change() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    init_git_repo(&root);
+
+    std::fs::write(root.join("tracked.txt"), "one\n")?;
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "initial"]);
+
+    let app = AppBuilder::new().build()?;
+
+    // The first open scans the repository and caches the result.
+    let tree = FileTree::new(root.clone(), &app.editor);
+    assert_eq!(entry_status(&tree, "tracked.txt"), None);
+
+    // Modify the repository outside the editor; the watcher must refresh the cache. The watcher
+    // is registered on a background thread, so keep touching the file until an event lands (a
+    // write that happens before the watch is active would otherwise be missed).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let tree = FileTree::new(root.clone(), &app.editor);
+        if entry_status(&tree, "tracked.txt") == Some(GitStatus::Modified) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "git status cache did not refresh after the repository changed"
+        );
+        std::fs::write(root.join("tracked.txt"), "two\n")?;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    Ok(())
+}

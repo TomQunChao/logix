@@ -11,7 +11,6 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 use tui::{
     buffer::Buffer as Surface,
@@ -23,33 +22,9 @@ use helix_core::Position;
 
 use super::{Prompt, PromptEvent};
 
-/// Git status for a file
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitStatus {
-    Untracked,
-    Added,
-    Ignored,
-    Modified,
-    Deleted,
-    Renamed,
-    Conflict,
-}
+mod git_cache;
 
-impl GitStatus {
-    /// The short badge shown after the file name. Empty for statuses that are conveyed by color
-    /// alone (e.g. ignored files), so they don't add noise to every entry.
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Untracked => "?",
-            Self::Added => "A",
-            Self::Ignored => "",
-            Self::Modified => "M",
-            Self::Deleted => "D",
-            Self::Renamed => "R",
-            Self::Conflict => "C",
-        }
-    }
-}
+pub use git_cache::GitStatus;
 
 /// Nerd Font glyphs used to distinguish file types in the tree. Rendering these requires a
 /// terminal font patched with Nerd Fonts, otherwise they appear as replacement boxes.
@@ -503,12 +478,12 @@ impl FileTree {
 
     /// Load git status for all files in the workspace.
     ///
-    /// The scan runs synchronously, unlike the changed-file picker which streams results from a
-    /// background task. The tree needs the complete status map before it stamps its entries,
-    /// because a file's status is also inherited by the children of an ignored directory.
+    /// The scan result is cached in-process per workspace root and refreshed in the background by
+    /// a filesystem watcher, so reopening the tree does not rescan the repository. The scan runs
+    /// before the directory is listed because a file's status is also inherited by the children
+    /// of an ignored directory.
     fn load_git_status(&mut self, editor: &Editor) {
         let root = self.root.clone();
-
         let trust_full = editor
             .workspace_trust
             .query(
@@ -517,34 +492,7 @@ impl FileTree {
             )
             .is_trusted();
 
-        // The callback must be `Fn`, so collect through a lock rather than a captured `HashMap`.
-        let git_status = Mutex::new(HashMap::new());
-        editor.diff_providers.for_each_changed_file_sync(
-            &root,
-            trust_full,
-            // The tree also wants ignored files (shown dimmed), unlike the changed-file picker.
-            true,
-            |change| {
-                use helix_vcs::FileChange;
-                if let Ok(change) = change {
-                    let status = match change {
-                        FileChange::Untracked { .. } => GitStatus::Untracked,
-                        FileChange::Added { .. } => GitStatus::Added,
-                        FileChange::Ignored { .. } => GitStatus::Ignored,
-                        FileChange::Modified { .. } => GitStatus::Modified,
-                        FileChange::Conflict { .. } => GitStatus::Conflict,
-                        FileChange::Deleted { .. } => GitStatus::Deleted,
-                        FileChange::Renamed { .. } => GitStatus::Renamed,
-                    };
-                    if let Ok(mut map) = git_status.lock() {
-                        map.insert(change.path().to_path_buf(), status);
-                    }
-                }
-                true
-            },
-        );
-
-        self.git_status = git_status.into_inner().unwrap_or_default();
+        self.git_status = git_cache::load(&root, &editor.diff_providers, trust_full);
     }
 
     /// Refresh the file tree, preserving the browsing position (expanded
@@ -554,6 +502,9 @@ impl FileTree {
         let state = self.state();
         self.entries.clear();
         self.git_status.clear();
+        // A manual refresh must reflect changes immediately instead of waiting for the watcher's
+        // debounce, so drop the cached status and rescan.
+        git_cache::invalidate(&self.root);
         self.load_git_status(editor);
         self.load_directory(&self.root.clone(), 0);
         self.restore_state(&state);
