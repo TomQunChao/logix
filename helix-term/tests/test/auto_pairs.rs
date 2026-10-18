@@ -448,7 +448,7 @@ async fn append_basic() -> anyhow::Result<()> {
             format!("#[{}|]#", LINE_END),
             format!("a{}", pair.0),
             format!(
-                "#[{eol}{open}{close}|]#{eol}",
+                "{open}#[{close}|]#{eol}",
                 open = pair.0,
                 close = pair.1,
                 eol = LINE_END

@@ -15,6 +15,7 @@ mod test {
         Ok(())
     }
 
+    mod append_mode;
     mod auto_pairs;
     mod command_line;
     mod commands;

@@ -3347,14 +3347,18 @@ fn append_mode(cx: &mut Context) {
     let text = doc.text().slice(..);
 
     // Make sure there's room at the end of the document if the last
-    // selection butts up against it.
+    // selection butts up against it, unless the document already ends
+    // with a line ending (then the newline itself provides the room and
+    // appending would otherwise add a spurious blank line).
     let end = text.len_chars();
+    let ends_with_line_ending =
+        end > 0 && matches!(text.get_char(end - 1), Some('\n') | Some('\r'));
     let last_range = doc
         .selection(view.id)
         .iter()
         .last()
         .expect("selection should always have at least one range");
-    if !last_range.is_empty() && last_range.to() == end {
+    if !last_range.is_empty() && last_range.to() == end && !ends_with_line_ending {
         let transaction = Transaction::change(
             doc.text(),
             [(end, end, Some(doc.line_ending.as_str().into()))].into_iter(),
@@ -3363,10 +3367,16 @@ fn append_mode(cx: &mut Context) {
     }
 
     let selection = doc.selection(view.id).clone().transform(|range| {
-        Range::new(
-            range.from(),
-            graphemes::next_grapheme_boundary(doc.text().slice(..), range.to()),
-        )
+        let text = doc.text().slice(..);
+        // `Range::cursor` is the left edge of the cursor. When the cursor rests on a line
+        // ending (e.g. after moving right at the end of a line), `a` should insert at the end
+        // of the current line instead of jumping to the next one, matching standard editors.
+        let head = if matches!(text.get_char(range.cursor(text)), Some('\n') | Some('\r')) {
+            range.to()
+        } else {
+            graphemes::next_grapheme_boundary(text, range.to())
+        };
+        Range::new(range.from(), head)
     });
     doc.set_selection(view.id, selection);
 }
