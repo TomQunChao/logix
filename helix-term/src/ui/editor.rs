@@ -63,6 +63,76 @@ pub enum InsertEvent {
     RequestCompletion,
 }
 
+/// Choose the range of bufferline entries to render so that the focused buffer
+/// is visible within `available` columns.
+///
+/// Entries are rendered whole (never partially scrolled off the left edge). If
+/// everything fits the full range is returned, otherwise entries are added
+/// outward from the focused one, alternating sides so it stays roughly
+/// centered. A focused entry wider than the viewport is returned on its own and
+/// clipped by the renderer.
+fn bufferline_visible_range(
+    widths: &[usize],
+    active: usize,
+    available: usize,
+) -> ops::Range<usize> {
+    if widths.is_empty() {
+        return 0..0;
+    }
+
+    let active = active.min(widths.len() - 1);
+    let total: usize = widths.iter().sum();
+    if total <= available {
+        return 0..widths.len();
+    }
+
+    // Not even the focused entry fits: render it alone and let the caller clip it.
+    if widths[active] >= available {
+        return active..active + 1;
+    }
+
+    let mut start = active;
+    let mut end = active + 1;
+    let mut used = widths[active];
+    let mut prefer_left = true;
+
+    loop {
+        let mut expanded = None;
+        // Try the preferred side first, then the other one.
+        for take_left in [prefer_left, !prefer_left] {
+            if take_left {
+                if start == 0 {
+                    continue;
+                }
+                let idx = start - 1;
+                if used + widths[idx] <= available {
+                    start = idx;
+                    used += widths[idx];
+                    expanded = Some(true);
+                    break;
+                }
+            } else {
+                if end >= widths.len() {
+                    continue;
+                }
+                if used + widths[end] <= available {
+                    used += widths[end];
+                    end += 1;
+                    expanded = Some(false);
+                    break;
+                }
+            }
+        }
+
+        match expanded {
+            Some(took_left) => prefer_left = !took_left,
+            None => break,
+        }
+    }
+
+    start..end
+}
+
 impl EditorView {
     pub fn new(keymaps: Keymaps) -> Self {
         Self {
@@ -696,33 +766,51 @@ impl EditorView {
             .try_get("ui.bufferline")
             .unwrap_or_else(|| editor.theme.get("ui.statusline.inactive"));
 
-        let mut x = viewport.x;
         let current_doc = view!(editor).doc;
 
-        for doc in editor.documents() {
-            let fname = doc
-                .path()
-                .unwrap_or(&scratch)
-                .file_name()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or_default();
+        // Collect the rendered text and display width of every buffer entry so
+        // that the visible range can be chosen before drawing anything.
+        let buffers: Vec<_> = editor
+            .documents()
+            .map(|doc| {
+                let fname = doc
+                    .path()
+                    .unwrap_or(&scratch)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or_default();
+                let text = format!(" {}{} ", fname, if doc.is_modified() { "[+]" } else { "" });
+                let width = text.width();
+                (doc.id(), text, width)
+            })
+            .collect();
 
-            let style = if current_doc == doc.id() {
+        if buffers.is_empty() || viewport.width == 0 {
+            return;
+        }
+
+        let active = buffers
+            .iter()
+            .position(|(id, _, _)| *id == current_doc)
+            .unwrap_or(0);
+        let widths: Vec<usize> = buffers.iter().map(|(_, _, width)| *width).collect();
+        let visible = bufferline_visible_range(&widths, active, viewport.width as usize);
+
+        let mut x = viewport.x;
+        let max_x = viewport.right();
+
+        for (id, text, _) in &buffers[visible] {
+            let style = if current_doc == *id {
                 bufferline_active
             } else {
                 bufferline_inactive
             };
 
-            let text = format!(" {}{} ", fname, if doc.is_modified() { "[+]" } else { "" });
-            let used_width = viewport.x.saturating_sub(x);
-            let rem_width = surface.area.width.saturating_sub(used_width);
+            let rem_width = max_x.saturating_sub(x) as usize;
+            x = surface.set_stringn(x, viewport.y, text, rem_width, style).0;
 
-            x = surface
-                .set_stringn(x, viewport.y, &text, rem_width as usize, style)
-                .0;
-
-            if x >= surface.area.right() {
+            if x >= max_x {
                 break;
             }
         }
@@ -1816,5 +1904,67 @@ fn canonicalize_key(key: &mut KeyEvent) {
     } = key
     {
         key.modifiers.remove(KeyModifiers::SHIFT)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bufferline_visible_range;
+
+    fn assert_ranges_fit(widths: &[usize], range: std::ops::Range<usize>, available: usize) {
+        assert!(range.start < range.end);
+        assert!(range.end <= widths.len());
+        let used: usize = widths[range.clone()].iter().sum();
+        assert!(
+            used <= available,
+            "range {:?} uses {} columns, only {} available",
+            range,
+            used,
+            available
+        );
+    }
+
+    #[test]
+    fn bufferline_range_shows_everything_when_it_fits() {
+        let widths = [10, 10, 10];
+        assert_eq!(bufferline_visible_range(&widths, 2, 100), 0..3);
+        assert_eq!(bufferline_visible_range(&widths, 0, 30), 0..3);
+    }
+
+    #[test]
+    fn bufferline_range_keeps_focused_buffer_visible() {
+        let widths = vec![12; 20];
+
+        for active in 0..widths.len() {
+            let range = bufferline_visible_range(&widths, active, 80);
+            assert_ranges_fit(&widths, range.clone(), 80);
+            assert!(
+                range.contains(&active),
+                "focused buffer {} missing from {:?}",
+                active,
+                range
+            );
+        }
+    }
+
+    #[test]
+    fn bufferline_range_is_centered_on_focused_buffer() {
+        let widths = vec![10; 21];
+        let range = bufferline_visible_range(&widths, 10, 50);
+        assert_eq!(range, 8..13);
+    }
+
+    #[test]
+    fn bufferline_range_shows_buffers_after_focus_near_the_start() {
+        let widths = vec![10; 20];
+        let range = bufferline_visible_range(&widths, 1, 50);
+        assert_eq!(range, 0..5);
+    }
+
+    #[test]
+    fn bufferline_range_handles_empty_and_narrow_viewports() {
+        assert_eq!(bufferline_visible_range(&[], 0, 80), 0..0);
+        assert_eq!(bufferline_visible_range(&[100], 0, 10), 0..1);
+        assert_eq!(bufferline_visible_range(&[10, 10], 1, 5), 1..2);
     }
 }
